@@ -1,0 +1,6 @@
+export const RISK_LIMITS = {
+  PM25_DANGER: 150,
+  UV_DANGER: 8,
+  TEMP_DANGER: 42,
+  VISIBILITY_DANGER: 2,
+};
