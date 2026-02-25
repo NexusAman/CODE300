@@ -1,263 +1,852 @@
-import React, { useEffect, useState } from "react";
-import {
-  View,
-  Text,
-  Button,
-  ActivityIndicator,
-  StyleSheet,
-  Platform,
-} from "react-native";
+import * as Location from "expo-location";
 import * as Notifications from "expo-notifications";
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Dimensions,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
-import { getUserLocation } from "../../src/services/locationService";
-import { fetchEnvironmentalData } from "../../src/services/weatherService";
 import { evaluateRisk } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
+import { getUserLocation } from "../../src/services/locationService";
+import { fetchEnvironmentalData } from "../../src/services/weatherService";
+
+const { width } = Dimensions.get("window");
+
+// ─── AQI Helpers ─────────────────────────────────────────────────────────────
+
+const getAQILabel = (aqi: number | undefined) => {
+  if (!aqi) return "Unknown";
+  const labels = [
+    "",
+    "Good",
+    "Moderate",
+    "Unhealthy (Sensitive)",
+    "Unhealthy",
+    "Very Unhealthy",
+    "Hazardous",
+  ];
+  return labels[aqi] ?? "Unknown";
+};
+
+const calculateAQI = (pm25: number): number => {
+  if (pm25 <= 12) return Math.round((50 / 12) * pm25);
+  if (pm25 <= 35.4)
+    return Math.round(((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51);
+  if (pm25 <= 55.4)
+    return Math.round(((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101);
+  if (pm25 <= 150.4)
+    return Math.round(((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151);
+  if (pm25 <= 250.4)
+    return Math.round(((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201);
+  return Math.round(((500 - 301) / (500.4 - 250.5)) * (pm25 - 250.5) + 301);
+};
+
+// ─── Risk Config ──────────────────────────────────────────────────────────────
+
+type RiskConfig = {
+  level: string;
+  color: string;
+  glow: string;
+  icon: string;
+  bg: string;
+  advice: string;
+};
+
+const getRiskConfig = (realAQI: number | null): RiskConfig => {
+  if (!realAQI)
+    return {
+      level: "UNKNOWN",
+      color: "#6B7280",
+      glow: "#6B728020",
+      icon: "◎",
+      bg: "#0d0d14",
+      advice: "Awaiting sensor data…",
+    };
+  if (realAQI <= 50)
+    return {
+      level: "SAFE",
+      color: "#34D399",
+      glow: "#34D39920",
+      icon: "✦",
+      bg: "#060f0a",
+      advice: "Air quality is ideal. Enjoy outdoor activities.",
+    };
+  if (realAQI <= 100)
+    return {
+      level: "MODERATE",
+      color: "#FBBF24",
+      glow: "#FBBF2420",
+      icon: "◈",
+      bg: "#0f0c00",
+      advice: "Sensitive groups should limit prolonged exertion.",
+    };
+  if (realAQI <= 200)
+    return {
+      level: "UNHEALTHY",
+      color: "#F87171",
+      glow: "#F8717120",
+      icon: "⚠",
+      bg: "#0f0505",
+      advice: "Limit outdoor activity. Wear a mask if going out.",
+    };
+  return {
+    level: "DANGEROUS",
+    color: "#E879F9",
+    glow: "#E879F920",
+    icon: "☣",
+    bg: "#0d0010",
+    advice: "Stay indoors. Serious health risk.",
+  };
+};
+
+// ─── AQI Gauge ────────────────────────────────────────────────────────────────
+
+const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
+  const widthAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(widthAnim, {
+      toValue: Math.min((aqi ?? 0) / 500, 1),
+      duration: 1000,
+      useNativeDriver: false,
+    }).start();
+  }, [aqi]);
+
+  const barWidth = widthAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ["0%", "100%"],
+  });
+
+  return (
+    <View style={gaugeS.wrapper}>
+      <View style={gaugeS.track}>
+        {["#34D399", "#A3E635", "#FBBF24", "#FB923C", "#F87171", "#E879F9"].map(
+          (c, i) => (
+            <View key={i} style={[gaugeS.seg, { backgroundColor: c + "28" }]} />
+          ),
+        )}
+        <Animated.View
+          style={[gaugeS.fill, { width: barWidth, backgroundColor: color }]}
+        />
+      </View>
+      <View style={gaugeS.ticks}>
+        {["0", "100", "200", "300", "400", "500"].map((t) => (
+          <Text key={t} style={gaugeS.tick}>
+            {t}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+};
+
+const gaugeS = StyleSheet.create({
+  wrapper: { width: "100%", marginTop: 6 },
+  track: {
+    height: 10,
+    borderRadius: 5,
+    flexDirection: "row",
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.05)",
+    position: "relative",
+  },
+  seg: { flex: 1, height: 10 },
+  fill: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    height: 10,
+    borderRadius: 5,
+    opacity: 0.9,
+  },
+  ticks: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 5,
+  },
+  tick: { fontSize: 9, color: "#374151", fontWeight: "600" },
+});
+
+// ─── Stat Chip ────────────────────────────────────────────────────────────────
+
+const StatChip = ({
+  icon,
+  label,
+  value,
+  accent,
+}: {
+  icon: string;
+  label: string;
+  value: string;
+  accent: string;
+}) => (
+  <View style={chipS.chip}>
+    <Text style={chipS.icon}>{icon}</Text>
+    <Text style={[chipS.value, { color: accent }]}>{value}</Text>
+    <Text style={chipS.label}>{label}</Text>
+  </View>
+);
+
+const chipS = StyleSheet.create({
+  chip: {
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    alignItems: "center",
+    paddingVertical: 16,
+    paddingHorizontal: 6,
+    gap: 4,
+  },
+  icon: { fontSize: 20 },
+  value: { fontSize: 17, fontWeight: "800", letterSpacing: 0.2 },
+  label: { fontSize: 9, color: "#6B7280", fontWeight: "700", letterSpacing: 1 },
+});
+
+// ─── Metric Row ───────────────────────────────────────────────────────────────
+
+const MetricRow = ({
+  icon,
+  label,
+  value,
+  accent,
+  last,
+}: {
+  icon: string;
+  label: string;
+  value: string;
+  accent?: string;
+  last?: boolean;
+}) => (
+  <View style={[mS.row, last && { borderBottomWidth: 0, paddingBottom: 0 }]}>
+    <View style={mS.left}>
+      <Text style={mS.icon}>{icon}</Text>
+      <Text style={mS.label}>{label}</Text>
+    </View>
+    <Text style={[mS.value, accent ? { color: accent } : {}]}>{value}</Text>
+  </View>
+);
+
+const mS = StyleSheet.create({
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.05)",
+  },
+  left: { flexDirection: "row", alignItems: "center", gap: 10 },
+  icon: { fontSize: 15, width: 22, textAlign: "center" },
+  label: { fontSize: 13, color: "#9CA3AF", letterSpacing: 0.2 },
+  value: { fontSize: 13, color: "#F9FAFB", fontWeight: "700" },
+});
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<any>(null);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [locationName, setLocationName] = useState<string | null>(null);
+  const [coords, setCoords] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
-  // ------------------ AQI CATEGORY (1–6) ------------------
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(24)).current;
+
   const epaIndex = data?.current?.air_quality?.["us-epa-index"];
-
-  const getAQILabel = (aqi: number | undefined) => {
-    if (!aqi) return "Unknown";
-    switch (aqi) {
-      case 1:
-        return "Good";
-      case 2:
-        return "Moderate";
-      case 3:
-        return "Unhealthy (Sensitive)";
-      case 4:
-        return "Unhealthy";
-      case 5:
-        return "Very Unhealthy";
-      case 6:
-        return "Hazardous";
-      default:
-        return "Unknown";
-    }
-  };
-
-  // ------------------ REAL AQI (0–500) ------------------
-  const calculateAQI = (pm25: number) => {
-    if (pm25 <= 12) return Math.round((50 / 12) * pm25);
-    if (pm25 <= 35.4)
-      return Math.round(((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51);
-    if (pm25 <= 55.4)
-      return Math.round(((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101);
-    if (pm25 <= 150.4)
-      return Math.round(((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151);
-    if (pm25 <= 250.4)
-      return Math.round(((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201);
-    return Math.round(((500 - 301) / (500.4 - 250.5)) * (pm25 - 250.5) + 301);
-  };
-
   const pm25 = data?.current?.air_quality?.pm2_5;
   const realAQI = pm25 ? calculateAQI(pm25) : null;
+  const risk = getRiskConfig(realAQI);
 
-  // ------------------ EFFECT ------------------
+  // Orb pulse
   useEffect(() => {
-    if (Platform.OS !== "web") {
-      Notifications.requestPermissionsAsync();
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.14,
+          duration: 2400,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 2400,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    anim.start();
+    return () => anim.stop();
+  }, []);
+
+  // Fade/slide on data arrive
+  useEffect(() => {
+    if (data) {
+      fadeAnim.setValue(0);
+      slideAnim.setValue(24);
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 650,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 500,
+          useNativeDriver: true,
+        }),
+      ]).start();
     }
+  }, [data]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web") Notifications.requestPermissionsAsync();
     checkEnvironment();
   }, []);
 
-  // ------------------ MAIN CHECK FUNCTION ------------------
+  const reverseGeocode = async (lat: number, lon: number) => {
+    try {
+      const res = await Location.reverseGeocodeAsync({
+        latitude: lat,
+        longitude: lon,
+      });
+      if (res?.length) {
+        const p = res[0];
+        const parts = [p.city || p.district, p.region].filter(Boolean);
+        setLocationName(
+          parts.join(", ") ||
+            p.country ||
+            `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`,
+        );
+      }
+    } catch {
+      setLocationName(`${lat.toFixed(3)}°, ${lon.toFixed(3)}°`);
+    }
+  };
+
   const checkEnvironment = async () => {
     try {
       setLoading(true);
       setError(null);
-
-      const coords = await getUserLocation();
+      const userCoords = await getUserLocation();
+      setCoords(userCoords);
+      reverseGeocode(userCoords.latitude, userCoords.longitude);
 
       const envData = await fetchEnvironmentalData(
-        coords.latitude,
-        coords.longitude,
+        userCoords.latitude,
+        userCoords.longitude,
       );
-
       setData(envData);
+      setUpdatedAt(new Date());
+      setAlerts(evaluateRisk(envData));
 
-      const detectedAlerts = evaluateRisk(envData);
-      setAlerts(detectedAlerts);
-
-      // 🔥 Practical notification rule
-      if (realAQI && realAQI > 100 && Platform.OS !== "web") {
+      const freshAQI = envData?.current?.air_quality?.pm2_5
+        ? calculateAQI(envData.current.air_quality.pm2_5)
+        : null;
+      if (freshAQI && freshAQI > 100 && Platform.OS !== "web") {
         await sendRiskNotification([
-          `Air quality is unhealthy (AQI ${realAQI}). Limit outdoor activity.`,
+          `Air quality is unhealthy (AQI ${freshAQI}). Limit outdoor activity.`,
         ]);
       }
-    } catch (err) {
-      console.log("Error:", err);
-      setError("Failed to fetch environmental data.");
+    } catch {
+      setError("Could not fetch environmental data. Check your connection.");
     } finally {
       setLoading(false);
     }
   };
 
-  // ------------------ RISK STATUS ------------------
-  const getRiskLevel = () => {
-    if (!realAQI) return "UNKNOWN";
-
-    if (realAQI <= 50) return "SAFE";
-    if (realAQI <= 100) return "MODERATE";
-    if (realAQI <= 200) return "UNHEALTHY";
-    return "DANGEROUS";
-  };
-
-  const getRiskColor = () => {
-    if (!realAQI) return "#9E9E9E";
-
-    if (realAQI <= 50) return "#4CAF50";
-    if (realAQI <= 100) return "#FFC107";
-    if (realAQI <= 200) return "#F44336";
-    return "#7E0023";
-  };
-
-  // ------------------ UI ------------------
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Environmental Risk Monitor</Text>
-
-      {loading && <ActivityIndicator size="large" />}
-
-      {error && <Text style={styles.error}>{error}</Text>}
-
-      {data && (
-        <>
-          {/* STATUS CARD */}
-          <View
-            style={[styles.statusCard, { backgroundColor: getRiskColor() }]}
-          >
-            <Text style={styles.statusText}>{getRiskLevel()}</Text>
+    <ScrollView
+      style={[s.root, { backgroundColor: risk.bg }]}
+      contentContainerStyle={s.scroll}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* ══ TOP BAR ══ */}
+      <View style={s.topBar}>
+        <View style={s.topLeft}>
+          <Text style={s.appLabel}>ENVIRO MONITOR</Text>
+          <View style={s.locationRow}>
+            {locationName ? (
+              <>
+                <Text style={s.pinIcon}>📍</Text>
+                <Text style={s.locationText}>{locationName}</Text>
+              </>
+            ) : (
+              <>
+                <ActivityIndicator size="small" color="#4B5563" />
+                <Text style={s.locationMuted}>Locating…</Text>
+              </>
+            )}
           </View>
+        </View>
 
-          {/* WEATHER CARD */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Current Conditions</Text>
+        {coords && (
+          <View style={s.coordBadge}>
+            <Text style={s.coordLine}>{coords.latitude.toFixed(3)}° N</Text>
+            <Text style={s.coordLine}>{coords.longitude.toFixed(3)}° E</Text>
+          </View>
+        )}
+      </View>
 
-            <View style={styles.row}>
-              <Text style={styles.label}>🌡 Temperature</Text>
-              <Text style={styles.value}>{data.current.temp_c}°C</Text>
-            </View>
+      {/* ══ ORB ══ */}
+      <View style={s.orbSection}>
+        <Animated.View
+          style={[
+            s.ring3,
+            {
+              borderColor: risk.color + "0e",
+              transform: [{ scale: pulseAnim }],
+            },
+          ]}
+        />
+        <Animated.View
+          style={[
+            s.ring2,
+            {
+              borderColor: risk.color + "20",
+              transform: [{ scale: pulseAnim }],
+            },
+          ]}
+        />
+        <Animated.View
+          style={[
+            s.ring1,
+            {
+              borderColor: risk.color + "40",
+              transform: [{ scale: pulseAnim }],
+            },
+          ]}
+        />
+        <View
+          style={[
+            s.orb,
+            { borderColor: risk.color + "70", backgroundColor: risk.glow },
+          ]}
+        >
+          <Text style={[s.orbIcon, { color: risk.color }]}>{risk.icon}</Text>
+          <Text style={[s.orbLevel, { color: risk.color }]}>{risk.level}</Text>
+          <Text style={s.orbAQI}>
+            {realAQI !== null ? `AQI  ${realAQI}` : "No data"}
+          </Text>
+        </View>
+      </View>
 
-            <View style={styles.row}>
-              <Text style={styles.label}>🌫 PM2.5</Text>
-              <Text style={styles.value}>{pm25}</Text>
-            </View>
+      {/* Advice */}
+      <View
+        style={[
+          s.pill,
+          {
+            borderColor: risk.color + "50",
+            backgroundColor: risk.color + "10",
+          },
+        ]}
+      >
+        <Text style={[s.pillText, { color: risk.color }]}>{risk.advice}</Text>
+      </View>
 
-            <View style={styles.row}>
-              <Text style={styles.label}>🌍 AQI (Real)</Text>
-              <Text style={styles.value}>{realAQI ?? "-"}</Text>
-            </View>
+      {/* ══ FEEDBACK ══ */}
+      {loading && (
+        <View style={s.loadRow}>
+          <ActivityIndicator color={risk.color} size="small" />
+          <Text style={[s.loadText, { color: risk.color }]}>
+            Scanning environment…
+          </Text>
+        </View>
+      )}
+      {error && (
+        <View style={s.errBox}>
+          <Text style={s.errText}>⚡ {error}</Text>
+        </View>
+      )}
 
-            <View style={styles.row}>
-              <Text style={styles.label}>🌍 AQI (EPA Level)</Text>
-              <Text style={styles.value}>
-                {epaIndex} - {getAQILabel(epaIndex)}
+      {/* ══ DATA ══ */}
+      {data && (
+        <Animated.View
+          style={{
+            opacity: fadeAnim,
+            transform: [{ translateY: slideAnim }],
+            width: "100%",
+          }}
+        >
+          {/* Gauge card */}
+          <View style={s.card}>
+            <View style={s.cardHead}>
+              <Text style={s.cardLabel}>AQI GAUGE</Text>
+              <Text style={[s.cardAccent, { color: risk.color }]}>
+                {realAQI ?? "–"} / 500
               </Text>
             </View>
-
-            <View style={styles.row}>
-              <Text style={styles.label}>☀️ UV Index</Text>
-              <Text style={styles.value}>{data.current.uv}</Text>
-            </View>
-
-            <View style={styles.row}>
-              <Text style={styles.label}>👁 Visibility</Text>
-              <Text style={styles.value}>{data.current.vis_km} km</Text>
-            </View>
+            <AQIGauge aqi={realAQI} color={risk.color} />
           </View>
 
-          {/* ALERT CARD */}
+          {/* Chips */}
+          <View style={s.chips}>
+            <StatChip
+              icon="🌡"
+              label="TEMP"
+              value={`${data.current.temp_c}°C`}
+              accent="#60A5FA"
+            />
+            <StatChip
+              icon="☀️"
+              label="UV IDX"
+              value={String(data.current.uv ?? "–")}
+              accent="#FBBF24"
+            />
+            <StatChip
+              icon="👁"
+              label="VIS KM"
+              value={`${data.current.vis_km ?? "–"}`}
+              accent="#34D399"
+            />
+            <StatChip
+              icon="💧"
+              label="HUMIDITY"
+              value={`${data.current.humidity ?? "–"}%`}
+              accent="#818CF8"
+            />
+          </View>
+
+          {/* Detail readings */}
+          <View style={s.card}>
+            <View style={s.cardHead}>
+              <Text style={s.cardLabel}>READINGS</Text>
+              <View style={[s.liveDot, { backgroundColor: risk.color }]} />
+            </View>
+            <MetricRow
+              icon="🌫"
+              label="PM2.5 Particles"
+              value={`${pm25 ?? "–"} µg/m³`}
+              accent={realAQI && realAQI > 100 ? "#F87171" : undefined}
+            />
+            <MetricRow
+              icon="📊"
+              label="Real AQI (0–500)"
+              value={realAQI !== null ? String(realAQI) : "–"}
+              accent={risk.color}
+            />
+            <MetricRow
+              icon="🏛"
+              label="EPA Category"
+              value={epaIndex ? `${epaIndex} · ${getAQILabel(epaIndex)}` : "–"}
+            />
+            <MetricRow
+              icon="🌡"
+              label="Feels Like"
+              value={`${data.current.feelslike_c ?? data.current.temp_c}°C`}
+            />
+            <MetricRow
+              icon="💨"
+              label="Wind Speed"
+              value={`${data.current.wind_kph ?? "–"} km/h`}
+            />
+            <MetricRow
+              icon="🌧"
+              label="Precipitation"
+              value={`${data.current.precip_mm ?? "–"} mm`}
+              last
+            />
+          </View>
+
+          {/* Alerts */}
           {alerts.length > 0 && (
-            <View style={styles.alertCard}>
-              <Text style={styles.alertTitle}>⚠ Risk Alerts</Text>
-              {alerts.map((alert, index) => (
-                <Text key={index} style={styles.alertText}>
-                  • {alert.message}
-                </Text>
+            <View style={s.alertCard}>
+              <View style={s.cardHead}>
+                <Text style={s.alertLabel}>⚠ ACTIVE ALERTS</Text>
+                <View style={s.badge}>
+                  <Text style={s.badgeText}>{alerts.length}</Text>
+                </View>
+              </View>
+              {alerts.map((a, i) => (
+                <View
+                  key={i}
+                  style={[
+                    s.alertRow,
+                    i === alerts.length - 1 && { marginBottom: 0 },
+                  ]}
+                >
+                  <View style={s.alertDot} />
+                  <Text style={s.alertText}>{a.message}</Text>
+                </View>
               ))}
             </View>
           )}
-        </>
+        </Animated.View>
       )}
 
-      <View style={{ marginTop: 20 }}>
-        <Button title="Check Now" onPress={checkEnvironment} />
+      {/* ══ BUTTON ══ */}
+      <TouchableOpacity
+        style={[s.btn, { borderColor: risk.color + "80" }]}
+        onPress={checkEnvironment}
+        activeOpacity={0.7}
+        disabled={loading}
+      >
+        <View style={[s.btnInner, { backgroundColor: risk.color + "12" }]}>
+          <Text style={[s.btnText, { color: risk.color }]}>
+            {loading ? "Scanning…" : "↺   Refresh Data"}
+          </Text>
+        </View>
+      </TouchableOpacity>
+
+      {/* ══ FOOTER ══ */}
+      <View style={s.footer}>
+        {updatedAt && (
+          <Text style={s.footerText}>
+            Updated ·{" "}
+            {updatedAt.toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </Text>
+        )}
+        {coords && (
+          <Text style={s.footerText}>
+            {coords.latitude.toFixed(5)}°, {coords.longitude.toFixed(5)}°
+          </Text>
+        )}
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s = StyleSheet.create({
+  root: { flex: 1 },
+  scroll: {
     padding: 20,
-    backgroundColor: "#f4f6f8",
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: "bold",
-    marginBottom: 20,
-  },
-  statusCard: {
-    padding: 15,
-    borderRadius: 12,
+    paddingTop: 58,
     alignItems: "center",
-    marginBottom: 20,
+    paddingBottom: 56,
   },
-  statusText: {
-    color: "#fff",
-    fontWeight: "bold",
-    fontSize: 18,
-  },
-  card: {
-    backgroundColor: "#fff",
-    padding: 15,
-    borderRadius: 12,
-    marginBottom: 20,
-    elevation: 3,
-  },
-  cardTitle: {
-    fontWeight: "bold",
-    fontSize: 16,
-    marginBottom: 10,
-  },
-  row: {
+
+  // Top bar
+  topBar: {
+    width: "100%",
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 8,
+    alignItems: "flex-start",
+    marginBottom: 44,
   },
-  label: {
-    fontSize: 15,
+  topLeft: { gap: 6 },
+  appLabel: {
+    fontSize: 9,
+    letterSpacing: 3.5,
+    color: "#1F2937",
+    fontWeight: "800",
   },
-  value: {
-    fontWeight: "bold",
+  locationRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  pinIcon: { fontSize: 14 },
+  locationText: {
+    fontSize: 16,
+    color: "#F3F4F6",
+    fontWeight: "700",
+    letterSpacing: 0.1,
   },
-  alertCard: {
-    backgroundColor: "#fff3f3",
-    padding: 15,
+  locationMuted: {
+    fontSize: 13,
+    color: "#6B7280",
+    fontWeight: "600",
+    marginLeft: 4,
+  },
+  coordBadge: {
+    backgroundColor: "rgba(255,255,255,0.04)",
     borderRadius: 12,
-    borderLeftWidth: 5,
-    borderLeftColor: "#F44336",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    alignItems: "flex-end",
+    gap: 3,
   },
-  alertTitle: {
-    fontWeight: "bold",
+  coordLine: {
+    fontSize: 10,
+    color: "#4B5563",
+    fontWeight: "600",
+    letterSpacing: 0.8,
+  },
+
+  // Orb
+  orbSection: {
+    width: 240,
+    height: 240,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 20,
+  },
+  ring3: {
+    position: "absolute",
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    borderWidth: 1,
+  },
+  ring2: {
+    position: "absolute",
+    width: 206,
+    height: 206,
+    borderRadius: 103,
+    borderWidth: 1,
+  },
+  ring1: {
+    position: "absolute",
+    width: 178,
+    height: 178,
+    borderRadius: 89,
+    borderWidth: 1.5,
+  },
+  orb: {
+    width: 154,
+    height: 154,
+    borderRadius: 77,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+  },
+  orbIcon: { fontSize: 34, marginBottom: 2 },
+  orbLevel: { fontSize: 13, fontWeight: "900", letterSpacing: 3.5 },
+  orbAQI: { fontSize: 11, color: "#6B7280", letterSpacing: 2, marginTop: 2 },
+
+  // Advice pill
+  pill: {
+    borderWidth: 1,
+    borderRadius: 50,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    marginBottom: 32,
+    maxWidth: "88%",
+  },
+  pillText: {
+    fontSize: 12,
+    fontWeight: "600",
+    textAlign: "center",
+    lineHeight: 18,
+  },
+
+  // Feedback
+  loadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 20,
+  },
+  loadText: { fontSize: 12, letterSpacing: 1, fontWeight: "600" },
+  errBox: {
+    backgroundColor: "rgba(239,68,68,0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(239,68,68,0.22)",
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 20,
+    width: "100%",
+  },
+  errText: { color: "#F87171", fontSize: 13, fontWeight: "600" },
+
+  // Card
+  card: {
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    padding: 18,
+    marginBottom: 12,
+  },
+  cardHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+  cardLabel: {
+    fontSize: 9,
+    letterSpacing: 3,
+    color: "#374151",
+    fontWeight: "800",
+  },
+  cardAccent: { fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
+  liveDot: { width: 7, height: 7, borderRadius: 4 },
+
+  // Chips
+  chips: { flexDirection: "row", gap: 8, width: "100%", marginBottom: 12 },
+
+  // Alerts
+  alertCard: {
+    width: "100%",
+    backgroundColor: "rgba(248,113,113,0.06)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(248,113,113,0.16)",
+    padding: 18,
+    marginBottom: 12,
+  },
+  alertLabel: {
+    fontSize: 9,
+    letterSpacing: 3,
+    color: "#F87171",
+    fontWeight: "800",
+  },
+  badge: {
+    backgroundColor: "rgba(248,113,113,0.2)",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  badgeText: { fontSize: 11, color: "#F87171", fontWeight: "700" },
+  alertRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
     marginBottom: 8,
-    color: "#F44336",
+  },
+  alertDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "#F87171",
+    marginTop: 6,
   },
   alertText: {
-    color: "#d32f2f",
-    marginBottom: 5,
+    flex: 1,
+    color: "#FCA5A5",
+    fontSize: 13,
+    lineHeight: 20,
+    fontWeight: "500",
   },
-  error: {
-    color: "red",
-    marginBottom: 10,
+
+  // Button
+  btn: {
+    marginTop: 8,
+    borderWidth: 1.5,
+    borderRadius: 50,
+    overflow: "hidden",
+    width: "68%",
+  },
+  btnInner: { paddingVertical: 16, alignItems: "center" },
+  btnText: { fontSize: 12, fontWeight: "800", letterSpacing: 2.5 },
+
+  // Footer
+  footer: { marginTop: 24, alignItems: "center", gap: 4 },
+  footerText: {
+    fontSize: 10,
+    color: "#1F2937",
+    letterSpacing: 1,
+    fontWeight: "600",
   },
 });
