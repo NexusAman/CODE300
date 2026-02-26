@@ -8,7 +8,7 @@ import "react-native-reanimated";
 
 const { width, height } = Dimensions.get("window");
 
-// Keep native splash visible until we're ready to animate
+// Keep native splash visible until we're ready to animate!
 SplashScreen.preventAutoHideAsync();
 
 Notifications.setNotificationHandler({
