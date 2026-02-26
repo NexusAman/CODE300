@@ -171,7 +171,7 @@ const gaugeS = StyleSheet.create({
     justifyContent: "space-between",
     marginTop: 5,
   },
-  tick: { fontSize: 9, color: "#374151", fontWeight: "600" },
+  tick: { fontSize: 9, color: "#4B5563", fontWeight: "600" },
 });
 
 // ─── Stat Chip ────────────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ const chipS = StyleSheet.create({
   },
   icon: { fontSize: 20 },
   value: { fontSize: 17, fontWeight: "800", letterSpacing: 0.2 },
-  label: { fontSize: 9, color: "#6B7280", fontWeight: "700", letterSpacing: 1 },
+  label: { fontSize: 9, color: "#9CA3AF", fontWeight: "700", letterSpacing: 1 },
 });
 
 // ─── Metric Row ───────────────────────────────────────────────────────────────
@@ -250,6 +250,103 @@ const mS = StyleSheet.create({
   value: { fontSize: 13, color: "#F9FAFB", fontWeight: "700" },
 });
 
+// ─── Alert History Item ───────────────────────────────────────────────────────
+
+const severityConfig = {
+  danger: {
+    color: "#E879F9",
+    bg: "#E879F910",
+    border: "#E879F930",
+    label: "DANGER",
+  },
+  severe: {
+    color: "#F87171",
+    bg: "#F8717110",
+    border: "#F8717130",
+    label: "SEVERE",
+  },
+  warning: {
+    color: "#FBBF24",
+    bg: "#FBBF2410",
+    border: "#FBBF2430",
+    label: "WARN",
+  },
+};
+
+const AlertHistoryItem = ({
+  message,
+  time,
+  severity,
+  index,
+}: {
+  message: string;
+  time: string;
+  severity?: "warning" | "severe" | "danger";
+  index: number;
+}) => {
+  const cfg = severityConfig[severity ?? "severe"];
+  return (
+    <View
+      style={[ahS.row, { borderLeftColor: cfg.color, backgroundColor: cfg.bg }]}
+    >
+      <View style={ahS.topRow}>
+        <View
+          style={[
+            ahS.severityBadge,
+            { backgroundColor: cfg.bg, borderColor: cfg.border },
+          ]}
+        >
+          <Text style={[ahS.severityLabel, { color: cfg.color }]}>
+            {cfg.label}
+          </Text>
+        </View>
+        <Text style={ahS.time}>{time}</Text>
+      </View>
+      <Text style={ahS.msg}>{message}</Text>
+    </View>
+  );
+};
+
+const ahS = StyleSheet.create({
+  row: {
+    borderLeftWidth: 3,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+    gap: 6,
+  },
+  topRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  severityBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  severityLabel: {
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+  },
+  time: {
+    fontSize: 10,
+    color: "#6B7280",
+    fontWeight: "600",
+    letterSpacing: 0.5,
+    fontVariant: ["tabular-nums"],
+  },
+  msg: {
+    fontSize: 12,
+    color: "#D1D5DB",
+    lineHeight: 18,
+    fontWeight: "500",
+  },
+});
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
@@ -264,6 +361,24 @@ export default function HomeScreen() {
   } | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
+  // 🔔 Alert control
+  // FIX: was useState — stale closure meant alertedTypes was always [] inside handleRiskNotification,
+  // causing every alert to re-trigger a notification on every 5-min refresh.
+  const alertedTypesRef = useRef<string[]>([]);
+  const [alertHistory, setAlertHistory] = useState<
+    {
+      message: string;
+      time: string;
+      severity: "warning" | "severe" | "danger";
+    }[]
+  >([]);
+
+  // 📈 AQI Trend
+  // FIX: was useState — stale closure meant previousAQI was always null inside checkEnvironment,
+  // so trend was never computed.
+  const previousAQIRef = useRef<number | null>(null);
+  const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
+
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
@@ -273,7 +388,7 @@ export default function HomeScreen() {
   const realAQI = pm25 ? calculateAQI(pm25) : null;
   const risk = getRiskConfig(realAQI);
 
-  // Orb pulse
+  // Animation
   useEffect(() => {
     const anim = Animated.loop(
       Animated.sequence([
@@ -293,7 +408,6 @@ export default function HomeScreen() {
     return () => anim.stop();
   }, []);
 
-  // Fade/slide on data arrive
   useEffect(() => {
     if (data) {
       fadeAnim.setValue(0);
@@ -313,9 +427,27 @@ export default function HomeScreen() {
     }
   }, [data]);
 
+  // Initial load
   useEffect(() => {
-    if (Platform.OS !== "web") Notifications.requestPermissionsAsync();
-    checkEnvironment();
+    const init = async () => {
+      if (Platform.OS !== "web") {
+        await Notifications.requestPermissionsAsync();
+      }
+      await checkEnvironment();
+    };
+    init();
+  }, []);
+
+  // Auto refresh every 5 min
+  useEffect(() => {
+    const interval = setInterval(
+      () => {
+        checkEnvironment();
+      },
+      5 * 60 * 1000,
+    );
+
+    return () => clearInterval(interval);
   }, []);
 
   const reverseGeocode = async (lat: number, lon: number) => {
@@ -324,6 +456,7 @@ export default function HomeScreen() {
         latitude: lat,
         longitude: lon,
       });
+
       if (res?.length) {
         const p = res[0];
         const parts = [p.city || p.district, p.region].filter(Boolean);
@@ -338,30 +471,89 @@ export default function HomeScreen() {
     }
   };
 
+  // FIX: removed unused currentAQI param; now uses alertedTypesRef to avoid stale closure
+  const handleRiskNotification = async (riskAlerts: any[]) => {
+    if (Platform.OS === "web") return;
+
+    const newAlerts = riskAlerts.filter(
+      (alert) => !alertedTypesRef.current.includes(alert.type),
+    );
+
+    if (newAlerts.length > 0) {
+      // Send push notifications — service filters to severe/danger only
+      await sendRiskNotification(newAlerts);
+
+      alertedTypesRef.current = [
+        ...alertedTypesRef.current,
+        ...newAlerts.map((a) => a.type),
+      ];
+
+      // 📜 Save only severe/danger to history — warnings show in UI only
+      const severeAndAbove = newAlerts.filter(
+        (a) => a.severity === "severe" || a.severity === "danger",
+      );
+      if (severeAndAbove.length > 0) {
+        // Save each severe/danger alert as its own history entry
+        severeAndAbove.forEach((a) => {
+          setAlertHistory((prev) => [
+            {
+              message: a.message,
+              time: new Date().toLocaleTimeString(),
+              severity: a.severity,
+            },
+            ...prev.slice(0, 9),
+          ]);
+        });
+      }
+    }
+
+    // Remove types that are no longer active
+    alertedTypesRef.current = alertedTypesRef.current.filter((type) =>
+      riskAlerts.some((alert) => alert.type === type),
+    );
+  };
+
   const checkEnvironment = async () => {
     try {
       setLoading(true);
       setError(null);
+
       const userCoords = await getUserLocation();
       setCoords(userCoords);
-      reverseGeocode(userCoords.latitude, userCoords.longitude);
+
+      await reverseGeocode(userCoords.latitude, userCoords.longitude);
 
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
         userCoords.longitude,
       );
+
       setData(envData);
       setUpdatedAt(new Date());
-      setAlerts(evaluateRisk(envData));
 
-      const freshAQI = envData?.current?.air_quality?.pm2_5
-        ? calculateAQI(envData.current.air_quality.pm2_5)
-        : null;
-      if (freshAQI && freshAQI > 100 && Platform.OS !== "web") {
-        await sendRiskNotification([
-          `Air quality is unhealthy (AQI ${freshAQI}). Limit outdoor activity.`,
-        ]);
+      const riskAlerts = evaluateRisk(envData);
+      setAlerts(riskAlerts);
+
+      const pm25Value = envData?.current?.air_quality?.pm2_5;
+      const calculatedAQI = pm25Value ? calculateAQI(pm25Value) : null;
+
+      // 📈 Trend logic — FIX: use ref so value is always current, not stale closure
+      if (calculatedAQI !== null && previousAQIRef.current !== null) {
+        if (calculatedAQI > previousAQIRef.current + 5) {
+          setTrend("up");
+        } else if (calculatedAQI < previousAQIRef.current - 5) {
+          setTrend("down");
+        } else {
+          setTrend("stable");
+        }
       }
+
+      previousAQIRef.current = calculatedAQI;
+      if (calculatedAQI === null) {
+        setTrend(null);
+      }
+
+      await handleRiskNotification(riskAlerts);
     } catch {
       setError("Could not fetch environmental data. Check your connection.");
     } finally {
@@ -387,7 +579,7 @@ export default function HomeScreen() {
               </>
             ) : (
               <>
-                <ActivityIndicator size="small" color="#4B5563" />
+                <ActivityIndicator size="small" color="#6B7280" />
                 <Text style={s.locationMuted}>Locating…</Text>
               </>
             )}
@@ -442,6 +634,52 @@ export default function HomeScreen() {
           <Text style={s.orbAQI}>
             {realAQI !== null ? `AQI  ${realAQI}` : "No data"}
           </Text>
+          {trend && (
+            <View style={s.trendRow}>
+              <View
+                style={[
+                  s.trendPill,
+                  {
+                    backgroundColor:
+                      trend === "up"
+                        ? "#F8717118"
+                        : trend === "down"
+                          ? "#34D39918"
+                          : "#6B728018",
+                    borderColor:
+                      trend === "up"
+                        ? "#F8717140"
+                        : trend === "down"
+                          ? "#34D39940"
+                          : "#6B728040",
+                  },
+                ]}
+              >
+                <Text style={[s.trendIcon]}>
+                  {trend === "up" ? "▲" : trend === "down" ? "▼" : "●"}
+                </Text>
+                <Text
+                  style={[
+                    s.trendText,
+                    {
+                      color:
+                        trend === "up"
+                          ? "#F87171"
+                          : trend === "down"
+                            ? "#34D399"
+                            : "#9CA3AF",
+                    },
+                  ]}
+                >
+                  {trend === "up"
+                    ? "Rising"
+                    : trend === "down"
+                      ? "Improving"
+                      : "Stable"}
+                </Text>
+              </View>
+            </View>
+          )}
         </View>
       </View>
 
@@ -571,17 +809,63 @@ export default function HomeScreen() {
                   <Text style={s.badgeText}>{alerts.length}</Text>
                 </View>
               </View>
+
               {alerts.map((a, i) => (
-                <View
-                  key={i}
-                  style={[
-                    s.alertRow,
-                    i === alerts.length - 1 && { marginBottom: 0 },
-                  ]}
-                >
-                  <View style={s.alertDot} />
-                  <Text style={s.alertText}>{a.message}</Text>
+                <View key={i} style={s.alertRow}>
+                  <View
+                    style={[
+                      s.alertDot,
+                      {
+                        backgroundColor:
+                          a.severity === "danger"
+                            ? "#E879F9"
+                            : a.severity === "severe"
+                              ? "#F87171"
+                              : "#FBBF24",
+                      },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      s.alertText,
+                      {
+                        color:
+                          a.severity === "danger"
+                            ? "#F0ABFC"
+                            : a.severity === "severe"
+                              ? "#FCA5A5"
+                              : "#FDE68A",
+                      },
+                    ]}
+                  >
+                    {a.message}
+                  </Text>
                 </View>
+              ))}
+            </View>
+          )}
+
+          {/* Alert History */}
+          {alertHistory.length > 0 && (
+            <View style={s.historyCard}>
+              <View style={s.cardHead}>
+                <View style={s.historyTitleRow}>
+                  <Text style={s.historyIcon}>🕓</Text>
+                  <Text style={s.historyCardLabel}>ALERT HISTORY</Text>
+                </View>
+                <View style={s.historyBadge}>
+                  <Text style={s.historyBadgeText}>{alertHistory.length}</Text>
+                </View>
+              </View>
+
+              {alertHistory.map((item, i) => (
+                <AlertHistoryItem
+                  key={i}
+                  message={item.message}
+                  time={item.time}
+                  severity={item.severity}
+                  index={i}
+                />
               ))}
             </View>
           )}
@@ -596,9 +880,16 @@ export default function HomeScreen() {
         disabled={loading}
       >
         <View style={[s.btnInner, { backgroundColor: risk.color + "12" }]}>
-          <Text style={[s.btnText, { color: risk.color }]}>
-            {loading ? "Scanning…" : "↺   Refresh Data"}
-          </Text>
+          {loading ? (
+            <View style={s.btnLoadRow}>
+              <ActivityIndicator size="small" color={risk.color} />
+              <Text style={[s.btnText, { color: risk.color }]}>Scanning…</Text>
+            </View>
+          ) : (
+            <Text style={[s.btnText, { color: risk.color }]}>
+              ↺ Refresh Data
+            </Text>
+          )}
         </View>
       </TouchableOpacity>
 
@@ -634,7 +925,6 @@ const s = StyleSheet.create({
     paddingBottom: 56,
   },
 
-  // Top bar
   topBar: {
     width: "100%",
     flexDirection: "row",
@@ -646,7 +936,7 @@ const s = StyleSheet.create({
   appLabel: {
     fontSize: 9,
     letterSpacing: 3.5,
-    color: "#1F2937",
+    color: "#4B5563",
     fontWeight: "800",
   },
   locationRow: { flexDirection: "row", alignItems: "center", gap: 5 },
@@ -675,12 +965,11 @@ const s = StyleSheet.create({
   },
   coordLine: {
     fontSize: 10,
-    color: "#4B5563",
+    color: "#6B7280",
     fontWeight: "600",
     letterSpacing: 0.8,
   },
 
-  // Orb
   orbSection: {
     width: 240,
     height: 240,
@@ -720,9 +1009,31 @@ const s = StyleSheet.create({
   },
   orbIcon: { fontSize: 34, marginBottom: 2 },
   orbLevel: { fontSize: 13, fontWeight: "900", letterSpacing: 3.5 },
-  orbAQI: { fontSize: 11, color: "#6B7280", letterSpacing: 2, marginTop: 2 },
+  orbAQI: { fontSize: 11, color: "#9CA3AF", letterSpacing: 2, marginTop: 2 },
 
-  // Advice pill
+  trendRow: {
+    marginTop: 8,
+    alignItems: "center",
+  },
+  trendPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+  },
+  trendIcon: {
+    fontSize: 8,
+    color: "#9CA3AF",
+  },
+  trendText: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+  },
+
   pill: {
     borderWidth: 1,
     borderRadius: 50,
@@ -738,7 +1049,6 @@ const s = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // Feedback
   loadRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -758,7 +1068,6 @@ const s = StyleSheet.create({
   },
   errText: { color: "#F87171", fontSize: 13, fontWeight: "600" },
 
-  // Card
   card: {
     width: "100%",
     backgroundColor: "rgba(255,255,255,0.04)",
@@ -777,16 +1086,14 @@ const s = StyleSheet.create({
   cardLabel: {
     fontSize: 9,
     letterSpacing: 3,
-    color: "#374151",
+    color: "#6B7280",
     fontWeight: "800",
   },
   cardAccent: { fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
   liveDot: { width: 7, height: 7, borderRadius: 4 },
 
-  // Chips
   chips: { flexDirection: "row", gap: 8, width: "100%", marginBottom: 12 },
 
-  // Alerts
   alertCard: {
     width: "100%",
     backgroundColor: "rgba(248,113,113,0.06)",
@@ -830,7 +1137,41 @@ const s = StyleSheet.create({
     fontWeight: "500",
   },
 
-  // Button
+  historyCard: {
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    padding: 18,
+    marginBottom: 12,
+  },
+  historyTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  historyIcon: {
+    fontSize: 12,
+  },
+  historyCardLabel: {
+    fontSize: 9,
+    letterSpacing: 3,
+    color: "#6B7280",
+    fontWeight: "800",
+  },
+  historyBadge: {
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  historyBadgeText: {
+    fontSize: 11,
+    color: "#9CA3AF",
+    fontWeight: "700",
+  },
+
   btn: {
     marginTop: 8,
     borderWidth: 1.5,
@@ -840,12 +1181,16 @@ const s = StyleSheet.create({
   },
   btnInner: { paddingVertical: 16, alignItems: "center" },
   btnText: { fontSize: 12, fontWeight: "800", letterSpacing: 2.5 },
+  btnLoadRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
 
-  // Footer
   footer: { marginTop: 24, alignItems: "center", gap: 4 },
   footerText: {
     fontSize: 10,
-    color: "#1F2937",
+    color: "#4B5563",
     letterSpacing: 1,
     fontWeight: "600",
   },
