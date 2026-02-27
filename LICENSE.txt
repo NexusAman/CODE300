@@ -3,7 +3,7 @@ All Rights Reserved.
 
 PROJECT: Enviro Monitor
 TEAM:    Elite Executors
-AUTHOR:  Aman Keshri (Lead Developer)
+AUTHOR:  Aman Kumar Keshri (Lead Developer)
 GITHUB:  github.com/NexusAman
 
 ────────────────────────────────────────────────────────────────────────
