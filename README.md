@@ -197,7 +197,7 @@ eas build -p android --profile preview
 
 | Name | Role |
 |------|------|
-| **Aman Kumar Keshri** | Lead Developer |
+| **Aman Kumar Keshri** | Lead |
 | **Rohit Singh** | Team Member |
 | **Dheeraj Mahapatra** | Team Member |
 | **Shyam Kumar Soni** | Team Member |
