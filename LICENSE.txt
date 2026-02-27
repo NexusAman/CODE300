@@ -1,0 +1,55 @@
+Copyright (c) 2026 Elite Executors
+All Rights Reserved.
+
+PROJECT: Enviro Monitor
+TEAM:    Elite Executors
+AUTHOR:  Aman Kumar Keshri (Lead Developer)
+GITHUB:  github.com/NexusAman
+
+────────────────────────────────────────────────────────────────────────
+
+TEAM MEMBERS
+This project was built by Team Elite Executors as part of a Hackathon.
+All team members retain equal intellectual property rights.
+
+────────────────────────────────────────────────────────────────────────
+
+TERMS AND CONDITIONS
+
+1. PERMITTED USE
+   You are permitted to:
+   - View and study this source code for personal and educational purposes
+   - Fork this repository for non-commercial learning purposes
+   - Reference this project in academic or hackathon work with
+     proper attribution to Team Elite Executors
+
+2. RESTRICTIONS
+   You are NOT permitted to:
+   - Use this software or any part of it for commercial purposes
+   - Sell, sublicense, or monetize this software in any form
+   - Redistribute this software as your own work
+   - Remove or alter this copyright notice or team attribution
+   - Use this software in any product or service without written
+     permission from Team Elite Executors
+
+3. ATTRIBUTION
+   Any use, reference, or derivative of this work must clearly credit:
+   "Enviro Monitor by Team Elite Executors — github.com/NexusAman"
+
+4. NO WARRANTY
+   This software is provided "as is", without warranty of any kind,
+   express or implied. Team Elite Executors is not liable for any
+   damages or issues arising from the use of this software.
+
+5. COMMERCIAL USE
+   For commercial licensing inquiries, contact the team directly.
+   Written permission from Team Elite Executors is required before
+   any commercial use of this software.
+
+────────────────────────────────────────────────────────────────────────
+
+This project was built with significant time, effort, and problem-solving
+by Team Elite Executors during a Hackathon. Please respect the work
+that went into it.
+
+© 2026 Elite Executors. All Rights Reserved.
