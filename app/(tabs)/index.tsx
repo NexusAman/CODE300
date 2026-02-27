@@ -354,6 +354,13 @@ const ahS = StyleSheet.create({
   },
 });
 
+// ─── Refresh Interval & AppState Cooldown ────────────────────────────────────
+// FIX: 2 min interval — frequent enough for live weather feel,
+// responsible enough to not burn API quota.
+// AppState cooldown — prevents spam calls when user rapidly switches apps.
+const REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const APPSTATE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
@@ -370,7 +377,7 @@ export default function HomeScreen() {
 
   // 🔔 Alert control
   // FIX: was useState — stale closure meant alertedTypes was always [] inside handleRiskNotification,
-  // causing every alert to re-trigger a notification on every 5-min refresh.
+  // causing every alert to re-trigger a notification on every refresh.
   const alertedTypesRef = useRef<string[]>([]);
   const [alertHistory, setAlertHistory] = useState<
     {
@@ -385,6 +392,10 @@ export default function HomeScreen() {
   // so trend was never computed.
   const previousAQIRef = useRef<number | null>(null);
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
+
+  // ⏱ Last fetch timestamp — used for AppState cooldown only
+  // Prevents spam API calls when user rapidly switches apps
+  const lastFetchedAt = useRef<number | null>(null);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -445,22 +456,25 @@ export default function HomeScreen() {
     init();
   }, []);
 
-  // Real-time refresh every 60 seconds for severe/danger conditions
-  // Falls back gracefully — if already loading, skips the tick
+  // FIX: Changed from 60s to 2 minutes — sweet spot for weather app.
+  // Frequent enough to feel live, responsible enough to save API quota.
   useEffect(() => {
     const interval = setInterval(() => {
       if (!loading) checkEnvironment(true); // silent — no spinner
-    }, 60 * 1000); // every 60 seconds
+    }, REFRESH_INTERVAL_MS); // every 2 minutes
 
     return () => clearInterval(interval);
   }, [loading]);
 
-  // Re-check immediately when user returns to the app from background
-  // This ensures alerts fire even if the app was backgrounded for a long time
+  // FIX: Added cooldown to AppState listener — prevents API spam when
+  // user rapidly switches between apps. Only fetches if 2 min have passed.
   useEffect(() => {
     const handleAppStateChange = (nextState: AppStateStatus) => {
       if (nextState === "active") {
-        checkEnvironment(true); // silent — just check for alerts
+        const elapsed = Date.now() - (lastFetchedAt.current ?? 0);
+        if (elapsed > APPSTATE_COOLDOWN_MS) {
+          checkEnvironment(true); // silent — just check for alerts
+        }
       }
     };
 
@@ -511,7 +525,6 @@ export default function HomeScreen() {
         (a) => a.severity === "severe" || a.severity === "danger",
       );
       if (severeAndAbove.length > 0) {
-        // Save each severe/danger alert as its own history entry
         severeAndAbove.forEach((a) => {
           setAlertHistory((prev) => [
             {
@@ -591,6 +604,9 @@ export default function HomeScreen() {
       if (calculatedAQI === null) {
         setTrend(null);
       }
+
+      // ⏱ Save fetch timestamp — used by AppState cooldown
+      lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
     } catch {
