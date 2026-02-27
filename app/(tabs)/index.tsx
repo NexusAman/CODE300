@@ -4,6 +4,8 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Animated,
+  AppState,
+  AppStateStatus,
   Dimensions,
   Platform,
   ScrollView,
@@ -15,6 +17,11 @@ import {
 
 import { evaluateRisk } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
+import {
+  getFCMToken,
+  registerDeviceWithServer,
+  updateLocationOnServer,
+} from "../../src/services/fcmService";
 import { getUserLocation } from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
 
@@ -438,16 +445,27 @@ export default function HomeScreen() {
     init();
   }, []);
 
-  // Auto refresh every 5 min
+  // Real-time refresh every 60 seconds for severe/danger conditions
+  // Falls back gracefully — if already loading, skips the tick
   useEffect(() => {
-    const interval = setInterval(
-      () => {
-        checkEnvironment();
-      },
-      5 * 60 * 1000,
-    );
+    const interval = setInterval(() => {
+      if (!loading) checkEnvironment(true); // silent — no spinner
+    }, 60 * 1000); // every 60 seconds
 
     return () => clearInterval(interval);
+  }, [loading]);
+
+  // Re-check immediately when user returns to the app from background
+  // This ensures alerts fire even if the app was backgrounded for a long time
+  useEffect(() => {
+    const handleAppStateChange = (nextState: AppStateStatus) => {
+      if (nextState === "active") {
+        checkEnvironment(true); // silent — just check for alerts
+      }
+    };
+
+    const sub = AppState.addEventListener("change", handleAppStateChange);
+    return () => sub.remove();
   }, []);
 
   const reverseGeocode = async (lat: number, lon: number) => {
@@ -513,15 +531,36 @@ export default function HomeScreen() {
     );
   };
 
-  const checkEnvironment = async () => {
+  const checkEnvironment = async (silent = false) => {
     try {
-      setLoading(true);
+      // silent=true for background/interval checks — no spinner shown
+      if (!silent) setLoading(true);
       setError(null);
 
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
-      await reverseGeocode(userCoords.latitude, userCoords.longitude);
+      if (!silent)
+        await reverseGeocode(userCoords.latitude, userCoords.longitude);
+
+      // Register/update device with server for background push notifications
+      if (!silent) {
+        // FIX: check if token exists — show warning if permission denied
+        const token = await getFCMToken();
+        if (!token) {
+          setError(
+            "⚠️ Enable notifications in Settings to receive background alerts.",
+          );
+        } else {
+          await registerDeviceWithServer(
+            userCoords.latitude,
+            userCoords.longitude,
+          );
+        }
+      } else {
+        // fire and forget — not critical
+        updateLocationOnServer(userCoords.latitude, userCoords.longitude);
+      }
 
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
@@ -537,7 +576,7 @@ export default function HomeScreen() {
       const pm25Value = envData?.current?.air_quality?.pm2_5;
       const calculatedAQI = pm25Value ? calculateAQI(pm25Value) : null;
 
-      // 📈 Trend logic — FIX: use ref so value is always current, not stale closure
+      // 📈 Trend logic — use ref so value is always current, not stale closure
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
         if (calculatedAQI > previousAQIRef.current + 5) {
           setTrend("up");
@@ -555,9 +594,11 @@ export default function HomeScreen() {
 
       await handleRiskNotification(riskAlerts);
     } catch {
-      setError("Could not fetch environmental data. Check your connection.");
+      // Only show error on manual refresh — silent background checks fail quietly
+      if (!silent)
+        setError("Could not fetch environmental data. Check your connection.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -875,7 +916,7 @@ export default function HomeScreen() {
       {/* ══ BUTTON ══ */}
       <TouchableOpacity
         style={[s.btn, { borderColor: risk.color + "80" }]}
-        onPress={checkEnvironment}
+        onPress={() => checkEnvironment()}
         activeOpacity={0.7}
         disabled={loading}
       >
