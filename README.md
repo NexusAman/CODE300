@@ -48,7 +48,7 @@ Enviro Monitor is a real-time environmental monitoring mobile app that tracks **
 📱 MOBILE APP (Expo React Native)
 ┌─────────────────────────────────────────────────┐
 │  GPS Location  →  WeatherAPI  →  Risk Engine    │
-│  AQI Display   →  Alerts UI  →  Local Notif.   │
+│  AQI Display   →  Alerts UI  →  Local Notif.    │
 │  Token: ExponentPushToken[xxxx]                 │
 │  Auto refresh: every 2 min (app open)           │
 └─────────────┬───────────────────────────────────┘
@@ -197,7 +197,7 @@ eas build -p android --profile preview
 
 | Name | Role |
 |------|------|
-| **Aman Kumar Keshri** | Lead |
+| **Aman Kumar Keshri** | Team Lead |
 | **Rohit Singh** | Team Member |
 | **Dheeraj Mahapatra** | Team Member |
 | **Shyam Kumar Soni** | Team Member |
@@ -231,5 +231,5 @@ See LICENSE.txt for full terms.
 ---
 
 <p align="center">
-  Built with 💚 by <strong>Team Elite Executors</strong> — Hackathon 2026
+  Built with 💚 by <strong>Elite Executors</strong> — CODE300 2026
 </p>
