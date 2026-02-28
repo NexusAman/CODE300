@@ -375,6 +375,8 @@ export default function HomeScreen() {
     longitude: number;
   } | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  // FIX: Gate to prevent checkEnvironment running before AsyncStorage loads
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
 
   // 🔔 Alert control
   // FIX: was useState — stale closure meant alertedTypes was always [] inside handleRiskNotification,
@@ -414,6 +416,7 @@ export default function HomeScreen() {
       } catch {
         // fail silently — not critical
       }
+      setAlertsLoaded(true); // ← signal ready AFTER loading
     };
     loadPersistedAlerts();
   }, []);
@@ -462,8 +465,11 @@ export default function HomeScreen() {
     }
   }, [data]);
 
-  // Initial load
+  // FIX: Only run initial check AFTER AsyncStorage has loaded
+  // Prevents race condition where checkEnvironment runs before
+  // alertedTypesRef is populated → causing duplicate notifications
   useEffect(() => {
+    if (!alertsLoaded) return;
     const init = async () => {
       if (Platform.OS !== "web") {
         await Notifications.requestPermissionsAsync();
@@ -471,7 +477,7 @@ export default function HomeScreen() {
       await checkEnvironment();
     };
     init();
-  }, []);
+  }, [alertsLoaded]);
 
   // FIX: Changed from 60s to 2 minutes — sweet spot for weather app.
   // Frequent enough to feel live, responsible enough to save API quota.
@@ -483,21 +489,35 @@ export default function HomeScreen() {
     return () => clearInterval(interval);
   }, [loading]);
 
-  // FIX: Added cooldown to AppState listener — prevents API spam when
-  // user rapidly switches between apps. Only fetches if 2 min have passed.
+  // FIX: Tell server when app goes background/foreground
+  // → server skips push when app is open (prevents duplicates)
   useEffect(() => {
     const handleAppStateChange = (nextState: AppStateStatus) => {
       if (nextState === "active") {
+        // App came to foreground — tell server app is open
         const elapsed = Date.now() - (lastFetchedAt.current ?? 0);
         if (elapsed > APPSTATE_COOLDOWN_MS) {
-          checkEnvironment(true); // silent — just check for alerts
+          checkEnvironment(true);
         }
+        // Tell server app is now open → skip push
+        updateLocationOnServer(
+          coords?.latitude ?? 0,
+          coords?.longitude ?? 0,
+          true,
+        );
+      } else if (nextState === "background") {
+        // App went to background — tell server to resume push
+        updateLocationOnServer(
+          coords?.latitude ?? 0,
+          coords?.longitude ?? 0,
+          false,
+        );
       }
     };
 
     const sub = AppState.addEventListener("change", handleAppStateChange);
     return () => sub.remove();
-  }, []);
+  }, [coords]);
 
   const reverseGeocode = async (lat: number, lon: number) => {
     try {
@@ -603,6 +623,12 @@ export default function HomeScreen() {
           await registerDeviceWithServer(
             userCoords.latitude,
             userCoords.longitude,
+          );
+          // FIX: Tell server app is open → skip push (local handles it)
+          updateLocationOnServer(
+            userCoords.latitude,
+            userCoords.longitude,
+            true,
           );
         }
       } else {

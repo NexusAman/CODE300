@@ -4,10 +4,17 @@ import * as Notifications from "expo-notifications";
 
 // Your Render.com server URL — update this after deploying
 const SERVER_URL =
-  process.env.EXPO_PUBLIC_SERVER_URL || "https://enviro-server.onrender.com";
+  process.env.EXPO_PUBLIC_SERVER_URL || "https://your-app.onrender.com";
+
+// ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
+// getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
+let cachedToken: string | null = null;
 
 // ─── Get FCM token from Expo ──────────────────────────────────────────────────
 export const getFCMToken = async (): Promise<string | null> => {
+  // Return cached token immediately if available
+  if (cachedToken) return cachedToken;
+
   try {
     // Push notifications only work on real devices
     if (!Device.isDevice) {
@@ -34,7 +41,8 @@ export const getFCMToken = async (): Promise<string | null> => {
       projectId: process.env.EXPO_PUBLIC_PROJECT_ID,
     });
 
-    return tokenData.data;
+    cachedToken = tokenData.data; // ← cache it
+    return cachedToken;
   } catch (err) {
     console.warn("Failed to get FCM token:", err);
     return null;
@@ -63,9 +71,12 @@ export const registerDeviceWithServer = async (
 };
 
 // ─── Update location on server when it changes ───────────────────────────────
+// appOpen: true  → server will SKIP push (app handles locally)
+// appOpen: false → server will SEND push (app is closed)
 export const updateLocationOnServer = async (
   latitude: number,
   longitude: number,
+  appOpen: boolean = false,
 ): Promise<void> => {
   try {
     const token = await getFCMToken();
@@ -75,6 +86,7 @@ export const updateLocationOnServer = async (
       fcmToken: token,
       latitude,
       longitude,
+      appOpen,
     });
   } catch (err) {
     // Fail silently — not critical
