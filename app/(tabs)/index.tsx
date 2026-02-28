@@ -394,6 +394,7 @@ export default function HomeScreen() {
   // FIX: was useState — stale closure meant previousAQI was always null inside checkEnvironment,
   // so trend was never computed.
   const previousAQIRef = useRef<number | null>(null);
+  const isCheckingRef = useRef(false); // ⛔ prevents overlapping checks
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
 
   // ⏱ Last fetch timestamp — used for AppState cooldown only
@@ -483,11 +484,11 @@ export default function HomeScreen() {
   // Frequent enough to feel live, responsible enough to save API quota.
   useEffect(() => {
     const interval = setInterval(() => {
-      if (!loading) checkEnvironment(true); // silent — no spinner
-    }, REFRESH_INTERVAL_MS); // every 2 minutes
+      checkEnvironment(true); // ref lock prevents overlap
+    }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [loading]);
+  }, []);
 
   // FIX: Tell server when app goes background/foreground
   // → server skips push when app is open (prevents duplicates)
@@ -600,6 +601,10 @@ export default function HomeScreen() {
   };
 
   const checkEnvironment = async (silent = false) => {
+    // ⛔ Prevent overlapping executions
+    if (isCheckingRef.current) return;
+    isCheckingRef.current = true;
+
     try {
       // silent=true for background/interval checks — no spinner shown
       if (!silent) setLoading(true);
@@ -608,13 +613,14 @@ export default function HomeScreen() {
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
-      if (!silent)
+      if (!silent) {
         await reverseGeocode(userCoords.latitude, userCoords.longitude);
+      }
 
       // Register/update device with server for background push notifications
       if (!silent) {
-        // FIX: check if token exists — show warning if permission denied
         const token = await getFCMToken();
+
         if (!token) {
           setError(
             "⚠️ Enable notifications in Settings to receive background alerts.",
@@ -624,7 +630,8 @@ export default function HomeScreen() {
             userCoords.latitude,
             userCoords.longitude,
           );
-          // FIX: Tell server app is open → skip push (local handles it)
+
+          // Tell server app is open → skip push (local handles it)
           updateLocationOnServer(
             userCoords.latitude,
             userCoords.longitude,
@@ -650,7 +657,7 @@ export default function HomeScreen() {
       const pm25Value = envData?.current?.air_quality?.pm2_5;
       const calculatedAQI = pm25Value ? calculateAQI(pm25Value) : null;
 
-      // 📈 Trend logic — use ref so value is always current, not stale closure
+      // 📈 Trend logic
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
         if (calculatedAQI > previousAQIRef.current + 5) {
           setTrend("up");
@@ -662,20 +669,26 @@ export default function HomeScreen() {
       }
 
       previousAQIRef.current = calculatedAQI;
+
       if (calculatedAQI === null) {
         setTrend(null);
       }
 
-      // ⏱ Save fetch timestamp — used by AppState cooldown
+      // ⏱ Save fetch timestamp
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
     } catch {
-      // Only show error on manual refresh — silent background checks fail quietly
-      if (!silent)
+      if (!silent) {
         setError("Could not fetch environmental data. Check your connection.");
+      }
     } finally {
-      if (!silent) setLoading(false);
+      // 🔓 Always release lock
+      isCheckingRef.current = false;
+
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
