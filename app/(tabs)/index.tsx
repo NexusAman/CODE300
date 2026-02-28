@@ -520,7 +520,11 @@ export default function HomeScreen() {
     return () => sub.remove();
   }, [coords]);
 
-  const reverseGeocode = async (lat: number, lon: number) => {
+  const reverseGeocode = async (
+    lat: number,
+    lon: number,
+    fallbackLocation?: { name?: string; region?: string },
+  ) => {
     try {
       const res = await Location.reverseGeocodeAsync({
         latitude: lat,
@@ -529,15 +533,39 @@ export default function HomeScreen() {
 
       if (res?.length) {
         const p = res[0];
-        const parts = [p.city || p.district, p.region].filter(Boolean);
-        setLocationName(
-          parts.join(", ") ||
-            p.country ||
-            `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`,
+
+        const parts = [p.city || p.subregion || p.district, p.region].filter(
+          Boolean,
         );
+
+        if (parts.length > 0) {
+          setLocationName(parts.join(", "));
+          return;
+        }
       }
+
+      // 🔁 Fallback to WeatherAPI location
+      if (fallbackLocation?.name) {
+        setLocationName(
+          fallbackLocation.region
+            ? `${fallbackLocation.name}, ${fallbackLocation.region}`
+            : fallbackLocation.name,
+        );
+        return;
+      }
+
+      // 🧭 Final fallback
+      setLocationName(`${lat.toFixed(2)}°, ${lon.toFixed(2)}°`);
     } catch {
-      setLocationName(`${lat.toFixed(3)}°, ${lon.toFixed(3)}°`);
+      if (fallbackLocation?.name) {
+        setLocationName(
+          fallbackLocation.region
+            ? `${fallbackLocation.name}, ${fallbackLocation.region}`
+            : fallbackLocation.name,
+        );
+      } else {
+        setLocationName(`${lat.toFixed(2)}°, ${lon.toFixed(2)}°`);
+      }
     }
   };
 
@@ -601,23 +629,29 @@ export default function HomeScreen() {
   };
 
   const checkEnvironment = async (silent = false) => {
-    // ⛔ Prevent overlapping executions
     if (isCheckingRef.current) return;
     isCheckingRef.current = true;
 
     try {
-      // silent=true for background/interval checks — no spinner shown
       if (!silent) setLoading(true);
       setError(null);
 
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
-      if (!silent) {
-        await reverseGeocode(userCoords.latitude, userCoords.longitude);
-      }
+      const envData = await fetchEnvironmentalData(
+        userCoords.latitude,
+        userCoords.longitude,
+      );
 
-      // Register/update device with server for background push notifications
+      // ✅ Always resolve location safely
+      await reverseGeocode(
+        userCoords.latitude,
+        userCoords.longitude,
+        envData.location,
+      );
+
+      // Register/update device with server
       if (!silent) {
         const token = await getFCMToken();
 
@@ -631,7 +665,6 @@ export default function HomeScreen() {
             userCoords.longitude,
           );
 
-          // Tell server app is open → skip push (local handles it)
           updateLocationOnServer(
             userCoords.latitude,
             userCoords.longitude,
@@ -639,14 +672,8 @@ export default function HomeScreen() {
           );
         }
       } else {
-        // fire and forget — not critical
         updateLocationOnServer(userCoords.latitude, userCoords.longitude);
       }
-
-      const envData = await fetchEnvironmentalData(
-        userCoords.latitude,
-        userCoords.longitude,
-      );
 
       setData(envData);
       setUpdatedAt(new Date());
@@ -657,7 +684,6 @@ export default function HomeScreen() {
       const pm25Value = envData?.current?.air_quality?.pm2_5;
       const calculatedAQI = pm25Value ? calculateAQI(pm25Value) : null;
 
-      // 📈 Trend logic
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
         if (calculatedAQI > previousAQIRef.current + 5) {
           setTrend("up");
@@ -674,21 +700,23 @@ export default function HomeScreen() {
         setTrend(null);
       }
 
-      // ⏱ Save fetch timestamp
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
-    } catch {
+    } catch (err) {
+      // Even if weather fails, show coordinates instead of infinite loading
+      if (!locationName && coords) {
+        setLocationName(
+          `${coords.latitude.toFixed(2)}°, ${coords.longitude.toFixed(2)}°`,
+        );
+      }
+
       if (!silent) {
         setError("Could not fetch environmental data. Check your connection.");
       }
     } finally {
-      // 🔓 Always release lock
       isCheckingRef.current = false;
-
-      if (!silent) {
-        setLoading(false);
-      }
+      if (!silent) setLoading(false);
     }
   };
 
