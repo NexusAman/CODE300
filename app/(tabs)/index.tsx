@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as Notifications from "expo-notifications";
 import React, { useEffect, useRef, useState } from "react";
@@ -401,6 +402,22 @@ export default function HomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
 
+  // FIX: Load persisted alerted types from storage on app start
+  // Prevents duplicate alerts/history when app is closed and reopened
+  useEffect(() => {
+    const loadPersistedAlerts = async () => {
+      try {
+        const stored = await AsyncStorage.getItem("alertedTypes");
+        if (stored) alertedTypesRef.current = JSON.parse(stored);
+        const storedHistory = await AsyncStorage.getItem("alertHistory");
+        if (storedHistory) setAlertHistory(JSON.parse(storedHistory));
+      } catch {
+        // fail silently — not critical
+      }
+    };
+    loadPersistedAlerts();
+  }, []);
+
   const epaIndex = data?.current?.air_quality?.["us-epa-index"];
   const pm25 = data?.current?.air_quality?.pm2_5;
   const realAQI = pm25 ? calculateAQI(pm25) : null;
@@ -520,20 +537,33 @@ export default function HomeScreen() {
         ...newAlerts.map((a) => a.type),
       ];
 
+      // FIX: Persist to AsyncStorage so duplicates don't fire on app restart
+      AsyncStorage.setItem(
+        "alertedTypes",
+        JSON.stringify(alertedTypesRef.current),
+      ).catch(() => {});
+
       // 📜 Save only severe/danger to history — warnings show in UI only
       const severeAndAbove = newAlerts.filter(
         (a) => a.severity === "severe" || a.severity === "danger",
       );
       if (severeAndAbove.length > 0) {
         severeAndAbove.forEach((a) => {
-          setAlertHistory((prev) => [
-            {
-              message: a.message,
-              time: new Date().toLocaleTimeString(),
-              severity: a.severity,
-            },
-            ...prev.slice(0, 9),
-          ]);
+          setAlertHistory((prev) => {
+            const updated = [
+              {
+                message: a.message,
+                time: new Date().toLocaleTimeString(),
+                severity: a.severity,
+              },
+              ...prev.slice(0, 9),
+            ];
+            // FIX: Persist history so it survives app restarts
+            AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
+              () => {},
+            );
+            return updated;
+          });
         });
       }
     }
@@ -542,6 +572,11 @@ export default function HomeScreen() {
     alertedTypesRef.current = alertedTypesRef.current.filter((type) =>
       riskAlerts.some((alert) => alert.type === type),
     );
+    // FIX: Persist cleared state too
+    AsyncStorage.setItem(
+      "alertedTypes",
+      JSON.stringify(alertedTypesRef.current),
+    ).catch(() => {});
   };
 
   const checkEnvironment = async (silent = false) => {
