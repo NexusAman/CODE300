@@ -42,9 +42,26 @@ const getAQIColor = (aqi: number) => {
   return "#E879F9";
 };
 
+const getAQILabel = (aqi: number) => {
+  if (aqi <= 50) return "GOOD";
+  if (aqi <= 100) return "MODERATE";
+  if (aqi <= 150) return "SENSITIVE";
+  if (aqi <= 200) return "UNHEALTHY";
+  if (aqi <= 300) return "VERY UNHEALTHY";
+  return "HAZARDOUS";
+};
+
 // ─── Saved Location Card ──────────────────────────────────────────────────────
 
-type WeatherSummary = { aqi: number; temp: number; condition: string } | null;
+type WeatherSummary = {
+  aqi: number;
+  temp: number;
+  feelsLike: number;
+  condition: string;
+  uv: number;
+  humidity: number;
+  wind: number;
+} | null;
 
 const LocationCard = ({
   loc,
@@ -69,11 +86,16 @@ const LocationCard = ({
             },
           },
         );
-        const pm25 = res.data?.current?.air_quality?.pm2_5;
+        const c = res.data?.current;
+        const pm25 = c?.air_quality?.pm2_5;
         setWeather({
           aqi: pm25 ? calculateAQI(pm25) : 0,
-          temp: res.data?.current?.temp_c,
-          condition: res.data?.current?.condition?.text ?? "",
+          temp: c?.temp_c ?? 0,
+          feelsLike: c?.feelslike_c ?? c?.temp_c ?? 0,
+          condition: c?.condition?.text ?? "",
+          uv: c?.uv ?? 0,
+          humidity: c?.humidity ?? 0,
+          wind: c?.wind_kph ?? 0,
         });
       } catch {
         setWeather(null);
@@ -85,43 +107,16 @@ const LocationCard = ({
   }, [loc.latitude, loc.longitude]);
 
   const aqiColor = weather ? getAQIColor(weather.aqi) : "#6B7280";
+  const aqiPct = weather ? Math.min(weather.aqi / 500, 1) : 0;
 
   return (
-    <View style={cs.card}>
-      <View style={cs.left}>
-        <Text style={cs.name}>{loc.name}</Text>
-        <Text style={cs.subtitle}>{loc.subtitle}</Text>
-        {loading ? (
-          <ActivityIndicator
-            size="small"
-            color="#6B7280"
-            style={{ marginTop: 6 }}
-          />
-        ) : weather ? (
-          <Text style={cs.meta}>
-            {weather.condition} · {weather.temp}°C
-          </Text>
-        ) : (
-          <Text style={cs.metaErr}>Could not load data</Text>
-        )}
-      </View>
-      <View style={cs.right}>
-        {weather && !loading && (
-          <View
-            style={[
-              cs.aqiBadge,
-              {
-                borderColor: aqiColor + "50",
-                backgroundColor: aqiColor + "15",
-              },
-            ]}
-          >
-            <Text style={[cs.aqiLabel, { color: aqiColor }]}>AQI</Text>
-            <Text style={[cs.aqiValue, { color: aqiColor }]}>
-              {weather.aqi}
-            </Text>
-          </View>
-        )}
+    <View style={[cs.card, { borderColor: aqiColor + "25" }]}>
+      {/* Top row: name + remove */}
+      <View style={cs.topRow}>
+        <View style={cs.nameBlock}>
+          <Text style={cs.name}>{loc.name}</Text>
+          <Text style={cs.subtitle}>{loc.subtitle}</Text>
+        </View>
         <TouchableOpacity
           style={cs.removeBtn}
           onPress={() => onRemove(loc.id)}
@@ -130,6 +125,66 @@ const LocationCard = ({
           <Text style={cs.removeText}>✕</Text>
         </TouchableOpacity>
       </View>
+
+      {loading ? (
+        <ActivityIndicator
+          size="small"
+          color="#6B7280"
+          style={{ marginTop: 14 }}
+        />
+      ) : weather ? (
+        <>
+          {/* AQI row */}
+          <View style={cs.aqiRow}>
+            <Text style={[cs.aqiNum, { color: aqiColor }]}>{weather.aqi}</Text>
+            <View style={cs.aqiMeta}>
+              <Text style={[cs.aqiLbl, { color: aqiColor }]}>
+                {getAQILabel(weather.aqi)}
+              </Text>
+              <Text style={cs.conditionText}>{weather.condition}</Text>
+            </View>
+          </View>
+
+          {/* AQI progress bar */}
+          <View style={cs.barTrack}>
+            <View
+              style={[
+                cs.barFill,
+                { width: `${aqiPct * 100}%` as any, backgroundColor: aqiColor },
+              ]}
+            />
+          </View>
+
+          {/* Stats row */}
+          <View style={cs.statsRow}>
+            <View style={cs.stat}>
+              <Text style={cs.statIcon}>🌡</Text>
+              <Text style={cs.statVal}>{weather.temp}°C</Text>
+              <Text style={cs.statLbl}>Temp</Text>
+            </View>
+            <View style={cs.statDiv} />
+            <View style={cs.stat}>
+              <Text style={cs.statIcon}>☀️</Text>
+              <Text style={cs.statVal}>{weather.uv}</Text>
+              <Text style={cs.statLbl}>UV</Text>
+            </View>
+            <View style={cs.statDiv} />
+            <View style={cs.stat}>
+              <Text style={cs.statIcon}>💧</Text>
+              <Text style={cs.statVal}>{weather.humidity}%</Text>
+              <Text style={cs.statLbl}>Humidity</Text>
+            </View>
+            <View style={cs.statDiv} />
+            <View style={cs.stat}>
+              <Text style={cs.statIcon}>💨</Text>
+              <Text style={cs.statVal}>{weather.wind}</Text>
+              <Text style={cs.statLbl}>km/h</Text>
+            </View>
+          </View>
+        </>
+      ) : (
+        <Text style={cs.metaErr}>Could not load data</Text>
+      )}
     </View>
   );
 };
@@ -137,31 +192,20 @@ const LocationCard = ({
 const cs = StyleSheet.create({
   card: {
     backgroundColor: "rgba(255,255,255,0.04)",
-    borderRadius: 16,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-    padding: 16,
-    marginBottom: 10,
+    padding: 18,
+    marginBottom: 12,
+  },
+  topRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
   },
-  left: { flex: 1, gap: 2 },
-  name: { fontSize: 16, fontWeight: "700", color: "#F9FAFB" },
+  nameBlock: { flex: 1, gap: 2 },
+  name: { fontSize: 17, fontWeight: "700", color: "#F9FAFB" },
   subtitle: { fontSize: 12, color: "#6B7280", fontWeight: "500" },
-  meta: { fontSize: 12, color: "#9CA3AF", marginTop: 4 },
-  metaErr: { fontSize: 12, color: "#EF4444", marginTop: 4 },
-  right: { alignItems: "center", gap: 10, marginLeft: 12 },
-  aqiBadge: {
-    alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 10,
-    borderWidth: 1,
-    gap: 1,
-  },
-  aqiLabel: { fontSize: 8, fontWeight: "800", letterSpacing: 1.5 },
-  aqiValue: { fontSize: 18, fontWeight: "800" },
+  metaErr: { fontSize: 12, color: "#EF4444", marginTop: 10 },
   removeBtn: {
     width: 28,
     height: 28,
@@ -171,8 +215,51 @@ const cs = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     borderColor: "rgba(239,68,68,0.25)",
+    marginLeft: 10,
   },
   removeText: { fontSize: 11, color: "#F87171", fontWeight: "700" },
+
+  aqiRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 14,
+    marginBottom: 10,
+  },
+  aqiNum: { fontSize: 42, fontWeight: "800", letterSpacing: -1 },
+  aqiMeta: { gap: 3 },
+  aqiLbl: { fontSize: 10, fontWeight: "800", letterSpacing: 2 },
+  conditionText: { fontSize: 12, color: "#9CA3AF", fontWeight: "500" },
+
+  barTrack: {
+    width: "100%",
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.07)",
+    marginBottom: 16,
+    overflow: "hidden",
+  },
+  barFill: { height: 5, borderRadius: 3, opacity: 0.85 },
+
+  statsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  stat: { flex: 1, alignItems: "center", gap: 3 },
+  statDiv: {
+    width: 1,
+    height: 32,
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  statIcon: { fontSize: 14 },
+  statVal: { fontSize: 14, fontWeight: "700", color: "#F3F4F6" },
+  statLbl: {
+    fontSize: 9,
+    color: "#6B7280",
+    fontWeight: "600",
+    letterSpacing: 0.5,
+  },
 });
 
 // ─── Search Result Item ───────────────────────────────────────────────────────

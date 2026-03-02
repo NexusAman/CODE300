@@ -132,88 +132,6 @@ const getRelativeTime = (date: Date): string => {
   return `${diffHours} hours ago`;
 };
 
-// ─── AQI History Chart ────────────────────────────────────────────────────────────
-
-type AQIEntry = { aqi: number; time: string };
-
-const getBarColor = (aqi: number) => {
-  if (aqi <= 50) return "#34D399";
-  if (aqi <= 100) return "#A3E635";
-  if (aqi <= 150) return "#FBBF24";
-  if (aqi <= 200) return "#F87171";
-  return "#E879F9";
-};
-
-const AQIHistoryChart = ({ history }: { history: AQIEntry[] }) => {
-  if (history.length < 2) return null;
-  const bars = history.slice(-12);
-  const maxAQI = Math.max(...bars.map((b) => b.aqi), 100);
-
-  return (
-    <View style={hcS.wrapper}>
-      <View style={hcS.barsRow}>
-        {bars.map((item, i) => {
-          const heightPct = Math.min(item.aqi / maxAQI, 1);
-          const barColor = getBarColor(item.aqi);
-          return (
-            <View key={i} style={hcS.barWrapper}>
-              <View style={hcS.barTrack}>
-                <View
-                  style={[
-                    hcS.bar,
-                    {
-                      height: `${Math.max(heightPct * 100, 6)}%` as any,
-                      backgroundColor: barColor,
-                    },
-                  ]}
-                />
-              </View>
-              <Text style={hcS.barLabel}>{item.time}</Text>
-            </View>
-          );
-        })}
-      </View>
-      <View style={hcS.axisRow}>
-        <Text style={hcS.axisLabel}>AQI 0</Text>
-        <Text style={hcS.axisLabel}>{maxAQI}</Text>
-      </View>
-    </View>
-  );
-};
-
-const hcS = StyleSheet.create({
-  wrapper: { width: "100%", marginTop: 8 },
-  barsRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    height: 72,
-    gap: 4,
-  },
-  barWrapper: { flex: 1, alignItems: "center", height: "100%" },
-  barTrack: {
-    flex: 1,
-    width: "100%",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderRadius: 4,
-    justifyContent: "flex-end",
-    overflow: "hidden",
-  },
-  bar: { width: "100%", borderRadius: 4 },
-  barLabel: {
-    fontSize: 7,
-    color: "#4B5563",
-    marginTop: 4,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-  axisRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 4,
-  },
-  axisLabel: { fontSize: 9, color: "#374151", fontWeight: "600" },
-});
-
 // ─── AQI Gauge ────────────────────────────────────────────────────────────────
 
 const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
@@ -504,10 +422,7 @@ export default function HomeScreen() {
   // Prevents spam API calls when user rapidly switches apps
   const lastFetchedAt = useRef<number | null>(null);
 
-  // 📈 AQI History — last 24 readings stored in AsyncStorage
-  const [aqiHistory, setAqiHistory] = useState<AQIEntry[]>([]);
-
-  // 🕐 Relative time — updates every 30s automatically
+  //  Relative time — updates every 30s automatically
   const [relativeTime, setRelativeTime] = useState<string | null>(null);
   useEffect(() => {
     if (!updatedAt) {
@@ -547,10 +462,6 @@ export default function HomeScreen() {
         if (stored) alertedTypesRef.current = JSON.parse(stored);
         const storedHistory = await AsyncStorage.getItem("alertHistory");
         if (storedHistory) setAlertHistory(JSON.parse(storedHistory));
-
-        // Restore AQI history
-        const storedAQIHistory = await AsyncStorage.getItem("aqiHistory");
-        if (storedAQIHistory) setAqiHistory(JSON.parse(storedAQIHistory));
 
         // Restore last known state — renders stale data instantly while
         // the background refresh (triggered below) fetches fresh data.
@@ -876,24 +787,6 @@ export default function HomeScreen() {
         setTrend(null);
       }
 
-      // Append to AQI history — keep last 24 entries
-      if (calculatedAQI !== null) {
-        setAqiHistory((prev) => {
-          const entry: AQIEntry = {
-            aqi: calculatedAQI,
-            time: new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-          };
-          const updated = [...prev, entry].slice(-24);
-          AsyncStorage.setItem("aqiHistory", JSON.stringify(updated)).catch(
-            () => {},
-          );
-          return updated;
-        });
-      }
-
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
@@ -1099,19 +992,6 @@ export default function HomeScreen() {
             width: "100%",
           }}
         >
-          {/* AQI History Chart */}
-          {aqiHistory.length >= 2 && (
-            <View style={s.card}>
-              <View style={s.cardHead}>
-                <Text style={s.cardLabel}>AQI HISTORY</Text>
-                <Text style={[s.cardAccent, { color: "#6B7280" }]}>
-                  last {aqiHistory.slice(-12).length} readings
-                </Text>
-              </View>
-              <AQIHistoryChart history={aqiHistory} />
-            </View>
-          )}
-
           {/* Gauge card */}
           <View style={s.card}>
             <View style={s.cardHead}>
