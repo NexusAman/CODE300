@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
@@ -11,10 +11,37 @@ const SERVER_URL =
 
 // Only block if still the original placeholder — never block the real server URL.
 const IS_PLACEHOLDER_URL = SERVER_URL === "https://your-app.onrender.com";
+const SERVER_TIMEOUT_MS = 10000;
+const SERVER_RETRY_COUNT = 2;
+
+const serverApi = axios.create({
+  timeout: SERVER_TIMEOUT_MS,
+});
 
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
 // getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
 let cachedToken: string | null = null;
+
+const LOCATION_UPDATE_MIN_INTERVAL_MS = 45_000;
+const LOCATION_JITTER_THRESHOLD = 0.0001;
+
+let lastLocationUpdate: {
+  latitude: number;
+  longitude: number;
+  appOpen: boolean;
+  sentAt: number;
+} | null = null;
+
+const isNearlySameLocation = (
+  previous: { latitude: number; longitude: number },
+  current: { latitude: number; longitude: number },
+) => {
+  return (
+    Math.abs(previous.latitude - current.latitude) <
+      LOCATION_JITTER_THRESHOLD &&
+    Math.abs(previous.longitude - current.longitude) < LOCATION_JITTER_THRESHOLD
+  );
+};
 
 const getExpoProjectId = (): string | undefined => {
   const envProjectId = process.env.EXPO_PUBLIC_PROJECT_ID;
@@ -32,6 +59,37 @@ const getExpoProjectId = (): string | undefined => {
   }
 
   return undefined;
+};
+
+const isRetriableAxiosError = (error: unknown): boolean => {
+  const axiosError = error as AxiosError;
+  const status = axiosError.response?.status;
+  if (status != null) {
+    return status >= 500 || status === 429;
+  }
+  return axiosError.code === "ECONNABORTED" || !axiosError.response;
+};
+
+const postWithRetry = async <TBody extends object>(
+  url: string,
+  body: TBody,
+  retries = SERVER_RETRY_COUNT,
+) => {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await serverApi.post(url, body);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries || !isRetriableAxiosError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+  }
+
+  throw lastError;
 };
 
 // ─── Get FCM token from Expo ──────────────────────────────────────────────────
@@ -104,7 +162,7 @@ export const registerDeviceWithServer = async (
     const token = await getFCMToken();
     if (!token) return;
 
-    await axios.post(`${SERVER_URL}/register`, {
+    await postWithRetry(`${SERVER_URL}/register`, {
       fcmToken: token,
       latitude,
       longitude,
@@ -127,16 +185,33 @@ export const updateLocationOnServer = async (
 ): Promise<void> => {
   if (IS_PLACEHOLDER_URL) return; // silently skip — registerDeviceWithServer already warned
 
+  const now = Date.now();
+  if (lastLocationUpdate) {
+    const sameAppState = lastLocationUpdate.appOpen === appOpen;
+    const sameLocation = isNearlySameLocation(lastLocationUpdate, {
+      latitude,
+      longitude,
+    });
+    const tooSoon =
+      now - lastLocationUpdate.sentAt < LOCATION_UPDATE_MIN_INTERVAL_MS;
+
+    if (sameAppState && sameLocation && tooSoon) {
+      return;
+    }
+  }
+
   try {
     const token = await getFCMToken();
     if (!token) return;
 
-    await axios.post(`${SERVER_URL}/update-location`, {
+    await postWithRetry(`${SERVER_URL}/update-location`, {
       fcmToken: token,
       latitude,
       longitude,
       appOpen,
     });
+
+    lastLocationUpdate = { latitude, longitude, appOpen, sentAt: now };
   } catch (err) {
     // Fail silently — not critical
     console.warn("Failed to update location on server:", err);

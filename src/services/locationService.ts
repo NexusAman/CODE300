@@ -67,6 +67,16 @@ TaskManager.defineTask(
 // ─── Start / Stop Background Location ────────────────────────────────────────
 
 export const startBackgroundLocation = async (): Promise<void> => {
+  const { status: fgStatus } = await Location.getForegroundPermissionsAsync();
+  if (fgStatus !== "granted") {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== "granted") {
+      throw new Error(
+        "Foreground location permission required before background access.",
+      );
+    }
+  }
+
   const { status } = await Location.requestBackgroundPermissionsAsync();
   if (status !== "granted") {
     throw new Error("Background location permission denied.");

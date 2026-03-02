@@ -431,9 +431,11 @@ export default function HomeScreen() {
   // updateLocationOnServer even when the app is fully closed
   useEffect(() => {
     // Start background tracking — if denied, show a subtle warning in UI
-    startBackgroundLocation().catch(() => {
-      setBgLocationDenied(true);
-    });
+    startBackgroundLocation()
+      .then(() => setBgLocationDenied(false))
+      .catch(() => {
+        setBgLocationDenied(true);
+      });
   }, []);
 
   // FIX: Load persisted alerted types from storage on app start
@@ -688,6 +690,14 @@ export default function HomeScreen() {
 
       const userCoords = await getUserLocation();
       setCoords(userCoords);
+
+      // Retry background tracking after foreground location is confirmed.
+      // This clears stale warning state when user grants permission in Settings.
+      startBackgroundLocation()
+        .then(() => setBgLocationDenied(false))
+        .catch(() => {
+          setBgLocationDenied(true);
+        });
 
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
@@ -1194,18 +1204,18 @@ const s = StyleSheet.create({
     marginBottom: 44,
   },
   topLeft: { gap: 6, flex: 1 },
-  topRight: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  topRight: { flexDirection: "column", alignItems: "flex-end", gap: 6 },
   savedBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     backgroundColor: "rgba(255,255,255,0.05)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.07)",
     alignItems: "center",
     justifyContent: "center",
   },
-  savedBtnText: { fontSize: 16 },
+  savedBtnText: { fontSize: 15 },
   appLabel: {
     fontSize: 9,
     letterSpacing: 3.5,
