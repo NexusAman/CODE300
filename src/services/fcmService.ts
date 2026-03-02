@@ -1,4 +1,5 @@
 import axios from "axios";
+import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 
@@ -14,6 +15,24 @@ const IS_PLACEHOLDER_URL = SERVER_URL === "https://your-app.onrender.com";
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
 // getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
 let cachedToken: string | null = null;
+
+const getExpoProjectId = (): string | undefined => {
+  const envProjectId = process.env.EXPO_PUBLIC_PROJECT_ID;
+  if (envProjectId) return envProjectId;
+
+  const easProjectId = (Constants as any)?.easConfig?.projectId;
+  if (typeof easProjectId === "string" && easProjectId.length > 0) {
+    return easProjectId;
+  }
+
+  const expoExtraProjectId = (Constants as any)?.expoConfig?.extra?.eas
+    ?.projectId;
+  if (typeof expoExtraProjectId === "string" && expoExtraProjectId.length > 0) {
+    return expoExtraProjectId;
+  }
+
+  return undefined;
+};
 
 // ─── Get FCM token from Expo ──────────────────────────────────────────────────
 export const getFCMToken = async (): Promise<string | null> => {
@@ -41,10 +60,23 @@ export const getFCMToken = async (): Promise<string | null> => {
       return null;
     }
 
+    const projectId = getExpoProjectId();
+    if (!projectId) {
+      console.warn(
+        "Push token unavailable: missing projectId. Set EXPO_PUBLIC_PROJECT_ID or ensure EAS project config is present.",
+      );
+      return null;
+    }
+
     // Get Expo push token — works as FCM token via Expo's push service
     const tokenData = await Notifications.getExpoPushTokenAsync({
-      projectId: process.env.EXPO_PUBLIC_PROJECT_ID,
+      projectId,
     });
+
+    if (!tokenData?.data) {
+      console.warn("Push token request returned an empty token.");
+      return null;
+    }
 
     cachedToken = tokenData.data; // ← cache it
     return cachedToken;

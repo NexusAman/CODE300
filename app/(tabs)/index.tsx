@@ -17,7 +17,7 @@ import {
   View,
 } from "react-native";
 
-import { evaluateRisk } from "../../src/engine/riskEngine";
+import { evaluateRisk, RiskAlert } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
 import {
   getFCMToken,
@@ -26,10 +26,11 @@ import {
 } from "../../src/services/fcmService";
 import {
   getUserLocation,
-  setBackgroundLocationCallback,
   startBackgroundLocation,
 } from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
+import { EnvironmentalData } from "../../src/types/environment";
+import { calculateAQI } from "../../src/utils/aqi";
 
 const { width } = Dimensions.get("window");
 
@@ -47,19 +48,6 @@ const getAQILabel = (aqi: number | undefined) => {
     "Hazardous",
   ];
   return labels[aqi] ?? "Unknown";
-};
-
-const calculateAQI = (pm25: number): number => {
-  if (pm25 <= 12) return Math.round((50 / 12) * pm25);
-  if (pm25 <= 35.4)
-    return Math.round(((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51);
-  if (pm25 <= 55.4)
-    return Math.round(((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101);
-  if (pm25 <= 150.4)
-    return Math.round(((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151);
-  if (pm25 <= 250.4)
-    return Math.round(((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201);
-  return Math.round(((500 - 301) / (500.4 - 250.5)) * (pm25 - 250.5) + 301);
 };
 
 // ─── Risk Config ──────────────────────────────────────────────────────────────
@@ -384,8 +372,8 @@ const APPSTATE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 export default function HomeScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<any>(null);
-  const [alerts, setAlerts] = useState<any[]>([]);
+  const [data, setData] = useState<EnvironmentalData | null>(null);
+  const [alerts, setAlerts] = useState<RiskAlert[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [locationName, setLocationName] = useState<string | null>(null);
   const [coords, setCoords] = useState<{
@@ -442,9 +430,6 @@ export default function HomeScreen() {
   // 📍 Background location — register callback so the task can call
   // updateLocationOnServer even when the app is fully closed
   useEffect(() => {
-    setBackgroundLocationCallback((lat, lon) => {
-      updateLocationOnServer(lat, lon, false);
-    });
     // Start background tracking — if denied, show a subtle warning in UI
     startBackgroundLocation().catch(() => {
       setBgLocationDenied(true);
@@ -635,7 +620,7 @@ export default function HomeScreen() {
   };
 
   // FIX: removed unused currentAQI param; now uses alertedTypesRef to avoid stale closure
-  const handleRiskNotification = async (riskAlerts: any[]) => {
+  const handleRiskNotification = async (riskAlerts: RiskAlert[]) => {
     if (Platform.OS === "web") return;
 
     const newAlerts = riskAlerts.filter(
@@ -735,12 +720,14 @@ export default function HomeScreen() {
               userCoords.longitude,
               true,
             );
-          } catch (regErr: any) {
+          } catch (regErr: unknown) {
+            const message =
+              regErr instanceof Error
+                ? regErr.message
+                : "Check your EXPO_PUBLIC_SERVER_URL.";
             // Show a clear, visible error so the dev/user knows why
             // the device isn't appearing in the backend dashboard.
-            setError(
-              `⚠️ Server registration failed: ${regErr?.message ?? "Check your EXPO_PUBLIC_SERVER_URL."}`,
-            );
+            setError(`⚠️ Server registration failed: ${message}`);
           }
         }
       } else {
@@ -790,7 +777,7 @@ export default function HomeScreen() {
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Even if weather fails, show coordinates instead of infinite loading
       if (!locationName && coords) {
         setLocationName(
@@ -800,7 +787,8 @@ export default function HomeScreen() {
 
       if (!silent) {
         // Show the correct message — location denial vs network failure are very different
-        if (err?.message?.toLowerCase().includes("location permission")) {
+        const message = err instanceof Error ? err.message.toLowerCase() : "";
+        if (message.includes("location permission")) {
           setError(
             "📍 Location access denied. Please enable it in Settings → Apps → Enviro Monitor → Permissions.",
           );
@@ -850,7 +838,7 @@ export default function HomeScreen() {
           )}
           <TouchableOpacity
             style={s.savedBtn}
-            onPress={() => router.push("/(tabs)/saved" as any)}
+            onPress={() => router.push("/(tabs)/saved")}
             activeOpacity={0.7}
           >
             <Text style={s.savedBtnText}>📌</Text>
@@ -964,7 +952,7 @@ export default function HomeScreen() {
       {bgLocationDenied && (
         <View style={s.warnBox}>
           <Text style={s.warnText}>
-            🔕 Background alerts disabled — grant "Allow all the time" location
+            🔕 Background alerts disabled — grant Allow all the time location
             access in Settings for notifications when app is closed.
           </Text>
         </View>

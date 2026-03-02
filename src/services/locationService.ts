@@ -1,5 +1,6 @@
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { updateLocationOnServer } from "./fcmService";
 
 export const getUserLocation = async () => {
   const { status } = await Location.requestForegroundPermissionsAsync();
@@ -25,22 +26,43 @@ export const BACKGROUND_LOCATION_TASK = "background-location-task";
 // Callback registered by the app — calls updateLocationOnServer
 let _onLocationUpdate: ((lat: number, lon: number) => void) | null = null;
 
+type BackgroundTaskPayload = {
+  locations?: {
+    coords: {
+      latitude: number;
+      longitude: number;
+    };
+  }[];
+};
+
 export const setBackgroundLocationCallback = (
   cb: (lat: number, lon: number) => void,
 ) => {
   _onLocationUpdate = cb;
 };
 
-TaskManager.defineTask(BACKGROUND_LOCATION_TASK, ({ data, error }: any) => {
-  if (error) {
-    console.warn("Background location task error:", error.message);
-    return;
-  }
-  if (data?.locations?.length) {
-    const { latitude, longitude } = data.locations[0].coords;
-    _onLocationUpdate?.(latitude, longitude);
-  }
-});
+TaskManager.defineTask(
+  BACKGROUND_LOCATION_TASK,
+  async ({
+    data,
+    error,
+  }: {
+    data?: BackgroundTaskPayload;
+    error?: { message?: string } | null;
+  }) => {
+    if (error) {
+      console.warn("Background location task error:", error.message);
+      return;
+    }
+    if (data?.locations?.length) {
+      const { latitude, longitude } = data.locations[0].coords;
+      updateLocationOnServer(latitude, longitude, false).catch((err) => {
+        console.warn("Background location server sync failed:", err);
+      });
+      _onLocationUpdate?.(latitude, longitude);
+    }
+  },
+);
 
 // ─── Start / Stop Background Location ────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 import axios from "axios";
+import { EnvironmentalData } from "../types/environment";
 
 // FIX: API key was hardcoded in source — anyone with repo access could use your quota.
 // Move it to a .env file at your project root:
@@ -6,7 +7,18 @@ import axios from "axios";
 // Expo automatically exposes EXPO_PUBLIC_* vars to the client bundle.
 const API_KEY = process.env.EXPO_PUBLIC_WEATHER_API_KEY;
 
-export const fetchEnvironmentalData = async (lat: number, lon: number) => {
+export type WeatherSearchResult = {
+  name: string;
+  region?: string;
+  country?: string;
+  lat: number;
+  lon: number;
+};
+
+export const fetchEnvironmentalData = async (
+  lat: number,
+  lon: number,
+): Promise<EnvironmentalData> => {
   if (!API_KEY) {
     throw new Error("Missing EXPO_PUBLIC_WEATHER_API_KEY in environment");
   }
@@ -23,4 +35,21 @@ export const fetchEnvironmentalData = async (lat: number, lon: number) => {
   );
 
   return response.data;
+};
+
+export const searchLocations = async (
+  query: string,
+): Promise<WeatherSearchResult[]> => {
+  if (!API_KEY) {
+    throw new Error("Missing EXPO_PUBLIC_WEATHER_API_KEY in environment");
+  }
+
+  const response = await axios.get(
+    "https://api.weatherapi.com/v1/search.json",
+    {
+      params: { key: API_KEY, q: query },
+    },
+  );
+
+  return response.data ?? [];
 };

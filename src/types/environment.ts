@@ -15,9 +15,18 @@ export interface CurrentWeather {
   humidity: number;
   wind_kph: number;
   precip_mm: number;
+  condition?: {
+    text?: string;
+  };
   air_quality: AirQuality;
+}
+
+export interface WeatherLocation {
+  name?: string;
+  region?: string;
 }
 
 export interface EnvironmentalData {
   current: CurrentWeather;
+  location?: WeatherLocation;
 }

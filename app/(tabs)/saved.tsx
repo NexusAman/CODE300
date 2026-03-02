@@ -1,4 +1,3 @@
-import axios from "axios";
 import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -12,44 +11,22 @@ import {
 } from "react-native";
 
 import {
-  SavedLocation,
   generateId,
   getSavedLocations,
   removeLocation,
+  SavedLocation,
   saveLocation,
 } from "../../src/services/savedLocationsService";
-
-const API_KEY = process.env.EXPO_PUBLIC_WEATHER_API_KEY;
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const calculateAQI = (pm25: number): number => {
-  if (pm25 <= 12) return Math.round((50 / 12) * pm25);
-  if (pm25 <= 35.4)
-    return Math.round(((100 - 51) / (35.4 - 12.1)) * (pm25 - 12.1) + 51);
-  if (pm25 <= 55.4)
-    return Math.round(((150 - 101) / (55.4 - 35.5)) * (pm25 - 35.5) + 101);
-  if (pm25 <= 150.4)
-    return Math.round(((200 - 151) / (150.4 - 55.5)) * (pm25 - 55.5) + 151);
-  return Math.round(((300 - 201) / (250.4 - 150.5)) * (pm25 - 150.5) + 201);
-};
-
-const getAQIColor = (aqi: number) => {
-  if (aqi <= 50) return "#34D399";
-  if (aqi <= 100) return "#FBBF24";
-  if (aqi <= 150) return "#FB923C";
-  if (aqi <= 200) return "#F87171";
-  return "#E879F9";
-};
-
-const getAQILabel = (aqi: number) => {
-  if (aqi <= 50) return "GOOD";
-  if (aqi <= 100) return "MODERATE";
-  if (aqi <= 150) return "SENSITIVE";
-  if (aqi <= 200) return "UNHEALTHY";
-  if (aqi <= 300) return "VERY UNHEALTHY";
-  return "HAZARDOUS";
-};
+import {
+  fetchEnvironmentalData,
+  searchLocations,
+  WeatherSearchResult,
+} from "../../src/services/weatherService";
+import {
+  calculateAQI,
+  getAQIColor,
+  getAQILabelByValue,
+} from "../../src/utils/aqi";
 
 // ─── Saved Location Card ──────────────────────────────────────────────────────
 
@@ -76,17 +53,11 @@ const LocationCard = ({
   useEffect(() => {
     const fetch = async () => {
       try {
-        const res = await axios.get(
-          "https://api.weatherapi.com/v1/current.json",
-          {
-            params: {
-              key: API_KEY,
-              q: `${loc.latitude},${loc.longitude}`,
-              aqi: "yes",
-            },
-          },
+        const envData = await fetchEnvironmentalData(
+          loc.latitude,
+          loc.longitude,
         );
-        const c = res.data?.current;
+        const c = envData?.current;
         const pm25 = c?.air_quality?.pm2_5;
         setWeather({
           aqi: pm25 ? calculateAQI(pm25) : 0,
@@ -139,7 +110,7 @@ const LocationCard = ({
             <Text style={[cs.aqiNum, { color: aqiColor }]}>{weather.aqi}</Text>
             <View style={cs.aqiMeta}>
               <Text style={[cs.aqiLbl, { color: aqiColor }]}>
-                {getAQILabel(weather.aqi)}
+                {getAQILabelByValue(weather.aqi)}
               </Text>
               <Text style={cs.conditionText}>{weather.condition}</Text>
             </View>
@@ -150,7 +121,7 @@ const LocationCard = ({
             <View
               style={[
                 cs.barFill,
-                { width: `${aqiPct * 100}%` as any, backgroundColor: aqiColor },
+                { width: `${aqiPct * 100}%`, backgroundColor: aqiColor },
               ]}
             />
           </View>
@@ -268,8 +239,8 @@ const SearchResultItem = ({
   item,
   onAdd,
 }: {
-  item: any;
-  onAdd: (item: any) => void;
+  item: WeatherSearchResult;
+  onAdd: (item: WeatherSearchResult) => void;
 }) => (
   <TouchableOpacity
     style={sr.row}
@@ -307,7 +278,7 @@ export default function SavedLocationsScreen() {
   const router = useRouter();
   const [locations, setLocations] = useState<SavedLocation[]>([]);
   const [query, setQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<WeatherSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -330,11 +301,8 @@ export default function SavedLocationsScreen() {
     searchTimeout.current = setTimeout(async () => {
       setSearching(true);
       try {
-        const res = await axios.get(
-          "https://api.weatherapi.com/v1/search.json",
-          { params: { key: API_KEY, q: query } },
-        );
-        setSearchResults(res.data ?? []);
+        const results = await searchLocations(query);
+        setSearchResults(results);
       } catch {
         setSearchResults([]);
       } finally {
@@ -343,7 +311,7 @@ export default function SavedLocationsScreen() {
     }, 500);
   }, [query]);
 
-  const handleAdd = async (item: any) => {
+  const handleAdd = async (item: WeatherSearchResult) => {
     const loc: SavedLocation = {
       id: generateId(),
       name: item.name,

@@ -1,3 +1,4 @@
+import { EnvironmentalData } from "../types/environment";
 import { RISK_LIMITS } from "../utils/riskThresholds";
 
 export interface RiskAlert {
@@ -6,7 +7,9 @@ export interface RiskAlert {
   message: string;
 }
 
-export const evaluateRisk = (data: any): RiskAlert[] => {
+export const evaluateRisk = (
+  data: EnvironmentalData | null | undefined,
+): RiskAlert[] => {
   const alerts: RiskAlert[] = [];
 
   const pm25 = data?.current?.air_quality?.pm2_5;
