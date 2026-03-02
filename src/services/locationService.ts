@@ -1,4 +1,5 @@
 import * as Location from "expo-location";
+import * as TaskManager from "expo-task-manager";
 
 export const getUserLocation = async () => {
   const { status } = await Location.requestForegroundPermissionsAsync();
@@ -7,13 +8,77 @@ export const getUserLocation = async () => {
     throw new Error("Location permission denied");
   }
 
-  // FIX: was getCurrentPositionAsync({}) with no options — could hang indefinitely
-  // on Android indoors waiting for a GPS fix. Balanced accuracy uses cell/wifi
-  // instead of pure GPS, and timeInterval caps the wait at 10 seconds.
   const location = await Location.getCurrentPositionAsync({
     accuracy: Location.Accuracy.Balanced,
     timeInterval: 10000,
   });
 
   return location.coords;
+};
+
+// ─── Background Location Task ─────────────────────────────────────────────────
+// Updates the server with the user's real location even when app is closed.
+// Task must be defined at TOP LEVEL of module (not inside a component).
+
+export const BACKGROUND_LOCATION_TASK = "background-location-task";
+
+// Callback registered by the app — calls updateLocationOnServer
+let _onLocationUpdate: ((lat: number, lon: number) => void) | null = null;
+
+export const setBackgroundLocationCallback = (
+  cb: (lat: number, lon: number) => void,
+) => {
+  _onLocationUpdate = cb;
+};
+
+TaskManager.defineTask(BACKGROUND_LOCATION_TASK, ({ data, error }: any) => {
+  if (error) {
+    console.warn("Background location task error:", error.message);
+    return;
+  }
+  if (data?.locations?.length) {
+    const { latitude, longitude } = data.locations[0].coords;
+    _onLocationUpdate?.(latitude, longitude);
+  }
+});
+
+// ─── Start / Stop Background Location ────────────────────────────────────────
+
+export const startBackgroundLocation = async (): Promise<void> => {
+  const { status } = await Location.requestBackgroundPermissionsAsync();
+  if (status !== "granted") {
+    throw new Error("Background location permission denied.");
+  }
+
+  const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(
+    BACKGROUND_LOCATION_TASK,
+  ).catch(() => false);
+
+  if (alreadyRunning) return;
+
+  await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
+    accuracy: Location.Accuracy.Balanced,
+    // Update every 5 min or if moved 500m — matches server cron interval
+    timeInterval: 5 * 60 * 1000,
+    distanceInterval: 500,
+    showsBackgroundLocationIndicator: false,
+    foregroundService: {
+      notificationTitle: "Enviro Monitor",
+      notificationBody: "Monitoring environmental conditions…",
+      notificationColor: "#34D399",
+    },
+  });
+
+  console.log("✅ Background location started");
+};
+
+export const stopBackgroundLocation = async (): Promise<void> => {
+  const running = await Location.hasStartedLocationUpdatesAsync(
+    BACKGROUND_LOCATION_TASK,
+  ).catch(() => false);
+
+  if (running) {
+    await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK);
+    console.log("🛑 Background location stopped");
+  }
 };

@@ -2,9 +2,14 @@ import axios from "axios";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 
-// Your Render.com server URL — update this after deploying
+// Your Render.com server URL.
+// EXPO_PUBLIC_SERVER_URL in your .env / EAS secrets takes priority.
+// Falls back to the real production URL so the app works even without the env var set.
 const SERVER_URL =
-  process.env.EXPO_PUBLIC_SERVER_URL || "https://your-app.onrender.com";
+  process.env.EXPO_PUBLIC_SERVER_URL || "https://enviro-server.onrender.com";
+
+// Only block if still the original placeholder — never block the real server URL.
+const IS_PLACEHOLDER_URL = SERVER_URL === "https://your-app.onrender.com";
 
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
 // getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
@@ -54,6 +59,15 @@ export const registerDeviceWithServer = async (
   latitude: number,
   longitude: number,
 ): Promise<void> => {
+  if (IS_PLACEHOLDER_URL) {
+    // Throw so the caller (checkEnvironment) can show a visible error
+    // instead of silently swallowing the failure. This is the #1 reason
+    // users don't appear in the backend dashboard.
+    throw new Error(
+      "SERVER_URL is still the placeholder. Set EXPO_PUBLIC_SERVER_URL in your .env file or EAS secrets and rebuild the app.",
+    );
+  }
+
   try {
     const token = await getFCMToken();
     if (!token) return;
@@ -67,6 +81,7 @@ export const registerDeviceWithServer = async (
     console.log("✅ Device registered with server");
   } catch (err) {
     console.warn("Failed to register device with server:", err);
+    throw err; // re-throw so caller can surface it in UI
   }
 };
 
@@ -78,6 +93,8 @@ export const updateLocationOnServer = async (
   longitude: number,
   appOpen: boolean = false,
 ): Promise<void> => {
+  if (IS_PLACEHOLDER_URL) return; // silently skip — registerDeviceWithServer already warned
+
   try {
     const token = await getFCMToken();
     if (!token) return;

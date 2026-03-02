@@ -1,9 +1,18 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
-import { Animated, Dimensions, Image, StyleSheet, Text } from "react-native";
+import {
+  Animated,
+  Dimensions,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import "react-native-reanimated";
 
 const { width, height } = Dimensions.get("window");
@@ -204,6 +213,123 @@ const sp = StyleSheet.create({
   },
 });
 
+// ─── Onboarding Overlay ───────────────────────────────────────────────────────
+const ONBOARDING_STEPS = [
+  {
+    icon: "🌿",
+    title: "Real-Time Environmental Risk",
+    desc: "Your air quality, UV, temperature, visibility and wind — evaluated live and explained in plain language.",
+  },
+  {
+    icon: "🔔",
+    title: "Background Alerts",
+    desc: "Even when the app is closed, our server checks conditions every 5 minutes and pushes a notification if something dangerous is detected.",
+  },
+  {
+    icon: "🛡",
+    title: "No Spam. Ever.",
+    desc: "You only get notified once per condition. No repeats until the condition clears and returns. You're in control.",
+  },
+];
+
+function OnboardingOverlay({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState(0);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  const goNext = () => {
+    if (step < ONBOARDING_STEPS.length - 1) {
+      Animated.timing(fadeAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }).start(() => {
+        setStep((s) => s + 1);
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      });
+    } else {
+      AsyncStorage.setItem("hasSeenOnboarding", "true").catch(() => {});
+      onDone();
+    }
+  };
+
+  const current = ONBOARDING_STEPS[step];
+
+  return (
+    <View style={ob.container}>
+      <Animated.View style={[ob.card, { opacity: fadeAnim }]}>
+        <Text style={ob.icon}>{current.icon}</Text>
+        <Text style={ob.title}>{current.title}</Text>
+        <Text style={ob.desc}>{current.desc}</Text>
+
+        {/* Dots */}
+        <View style={ob.dots}>
+          {ONBOARDING_STEPS.map((_, i) => (
+            <View
+              key={i}
+              style={[
+                ob.dot,
+                { backgroundColor: i === step ? "#34D399" : "#374151" },
+              ]}
+            />
+          ))}
+        </View>
+
+        <TouchableOpacity style={ob.btn} onPress={goNext} activeOpacity={0.8}>
+          <Text style={ob.btnText}>
+            {step < ONBOARDING_STEPS.length - 1 ? "Next →" : "Get Started"}
+          </Text>
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+}
+
+const ob = StyleSheet.create({
+  container: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#060f0a",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 998,
+    padding: 24,
+  },
+  card: { alignItems: "center", maxWidth: 340 },
+  icon: { fontSize: 52, marginBottom: 24 },
+  title: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: "#F9FAFB",
+    textAlign: "center",
+    letterSpacing: 0.2,
+    marginBottom: 14,
+  },
+  desc: {
+    fontSize: 14,
+    color: "#9CA3AF",
+    textAlign: "center",
+    lineHeight: 22,
+    fontWeight: "500",
+  },
+  dots: { flexDirection: "row", gap: 8, marginTop: 36, marginBottom: 28 },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  btn: {
+    backgroundColor: "#34D399",
+    paddingHorizontal: 36,
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  btnText: {
+    color: "#000",
+    fontWeight: "800",
+    fontSize: 15,
+    letterSpacing: 0.5,
+  },
+});
+
 // ─── Root Layout ──────────────────────────────────────────────────────────────
 
 export const unstable_settings = {
@@ -212,16 +338,37 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   const [splashDone, setSplashDone] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const router = useRouter();
+  const notifResponseListener = useRef<any>(null);
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
     SplashScreen.hideAsync();
+
+    // Check if onboarding has been seen before
+    AsyncStorage.getItem("hasSeenOnboarding")
+      .then((val) => {
+        if (!val) setShowOnboarding(true);
+      })
+      .catch(() => {});
+
+    // Handle notification taps — bring user to home screen
+    notifResponseListener.current =
+      Notifications.addNotificationResponseReceivedListener(() => {
+        router.push("/(tabs)");
+      });
+
+    return () => {
+      notifResponseListener.current?.remove();
+    };
   }, []);
 
   return (
     <>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="onboarding" options={{ headerShown: false }} />
         <Stack.Screen
           name="modal"
           options={{ presentation: "modal", title: "Modal" }}
@@ -229,8 +376,13 @@ export default function RootLayout() {
       </Stack>
       <StatusBar style="light" />
 
-      {/* Render animated splash on top until animation finishes */}
+      {/* Animated splash on top until animation finishes */}
       {!splashDone && <AnimatedSplash onFinish={() => setSplashDone(true)} />}
+
+      {/* Onboarding overlay — shown only on first ever launch */}
+      {splashDone && showOnboarding && (
+        <OnboardingOverlay onDone={() => setShowOnboarding(false)} />
+      )}
     </>
   );
 }

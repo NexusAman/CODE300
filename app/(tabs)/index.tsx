@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as Notifications from "expo-notifications";
+import { useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -23,7 +24,11 @@ import {
   registerDeviceWithServer,
   updateLocationOnServer,
 } from "../../src/services/fcmService";
-import { getUserLocation } from "../../src/services/locationService";
+import {
+  getUserLocation,
+  setBackgroundLocationCallback,
+  startBackgroundLocation,
+} from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
 
 const { width } = Dimensions.get("window");
@@ -114,6 +119,100 @@ const getRiskConfig = (realAQI: number | null): RiskConfig => {
     advice: "Stay indoors. Serious health risk.",
   };
 };
+
+// ─── Relative Time Helper ────────────────────────────────────────────────────────────
+const getRelativeTime = (date: Date): string => {
+  const diffMs = Date.now() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return "just now";
+  if (diffMins === 1) return "1 min ago";
+  if (diffMins < 60) return `${diffMins} min ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours === 1) return "1 hour ago";
+  return `${diffHours} hours ago`;
+};
+
+// ─── AQI History Chart ────────────────────────────────────────────────────────────
+
+type AQIEntry = { aqi: number; time: string };
+
+const getBarColor = (aqi: number) => {
+  if (aqi <= 50) return "#34D399";
+  if (aqi <= 100) return "#A3E635";
+  if (aqi <= 150) return "#FBBF24";
+  if (aqi <= 200) return "#F87171";
+  return "#E879F9";
+};
+
+const AQIHistoryChart = ({ history }: { history: AQIEntry[] }) => {
+  if (history.length < 2) return null;
+  const bars = history.slice(-12);
+  const maxAQI = Math.max(...bars.map((b) => b.aqi), 100);
+
+  return (
+    <View style={hcS.wrapper}>
+      <View style={hcS.barsRow}>
+        {bars.map((item, i) => {
+          const heightPct = Math.min(item.aqi / maxAQI, 1);
+          const barColor = getBarColor(item.aqi);
+          return (
+            <View key={i} style={hcS.barWrapper}>
+              <View style={hcS.barTrack}>
+                <View
+                  style={[
+                    hcS.bar,
+                    {
+                      height: `${Math.max(heightPct * 100, 6)}%` as any,
+                      backgroundColor: barColor,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={hcS.barLabel}>{item.time}</Text>
+            </View>
+          );
+        })}
+      </View>
+      <View style={hcS.axisRow}>
+        <Text style={hcS.axisLabel}>AQI 0</Text>
+        <Text style={hcS.axisLabel}>{maxAQI}</Text>
+      </View>
+    </View>
+  );
+};
+
+const hcS = StyleSheet.create({
+  wrapper: { width: "100%", marginTop: 8 },
+  barsRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    height: 72,
+    gap: 4,
+  },
+  barWrapper: { flex: 1, alignItems: "center", height: "100%" },
+  barTrack: {
+    flex: 1,
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 4,
+    justifyContent: "flex-end",
+    overflow: "hidden",
+  },
+  bar: { width: "100%", borderRadius: 4 },
+  barLabel: {
+    fontSize: 7,
+    color: "#4B5563",
+    marginTop: 4,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  axisRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 4,
+  },
+  axisLabel: { fontSize: 9, color: "#374151", fontWeight: "600" },
+});
 
 // ─── AQI Gauge ────────────────────────────────────────────────────────────────
 
@@ -359,12 +458,13 @@ const ahS = StyleSheet.create({
 // FIX: 2 min interval — frequent enough for live weather feel,
 // responsible enough to not burn API quota.
 // AppState cooldown — prevents spam calls when user rapidly switches apps.
-const REFRESH_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
-const APPSTATE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+const REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — matches server cron, saves battery + API quota
+const APPSTATE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<any>(null);
   const [alerts, setAlerts] = useState<any[]>([]);
@@ -397,16 +497,49 @@ export default function HomeScreen() {
   const isCheckingRef = useRef(false); // ⛔ prevents overlapping checks
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
 
+  // 🔕 Background location permission denied — show subtle warning in UI
+  const [bgLocationDenied, setBgLocationDenied] = useState(false);
+
   // ⏱ Last fetch timestamp — used for AppState cooldown only
   // Prevents spam API calls when user rapidly switches apps
   const lastFetchedAt = useRef<number | null>(null);
+
+  // 📈 AQI History — last 24 readings stored in AsyncStorage
+  const [aqiHistory, setAqiHistory] = useState<AQIEntry[]>([]);
+
+  // 🕐 Relative time — updates every 30s automatically
+  const [relativeTime, setRelativeTime] = useState<string | null>(null);
+  useEffect(() => {
+    if (!updatedAt) {
+      setRelativeTime(null);
+      return;
+    }
+    const update = () => setRelativeTime(getRelativeTime(updatedAt));
+    update();
+    const t = setInterval(update, 30000);
+    return () => clearInterval(t);
+  }, [updatedAt]);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
 
+  // 📍 Background location — register callback so the task can call
+  // updateLocationOnServer even when the app is fully closed
+  useEffect(() => {
+    setBackgroundLocationCallback((lat, lon) => {
+      updateLocationOnServer(lat, lon, false);
+    });
+    // Start background tracking — if denied, show a subtle warning in UI
+    startBackgroundLocation().catch(() => {
+      setBgLocationDenied(true);
+    });
+  }, []);
+
   // FIX: Load persisted alerted types from storage on app start
   // Prevents duplicate alerts/history when app is closed and reopened
+  // FIX 2: Also restore last-known location/data so the app renders
+  // immediately on cold-start instead of showing a blank loading screen.
   useEffect(() => {
     const loadPersistedAlerts = async () => {
       try {
@@ -414,6 +547,23 @@ export default function HomeScreen() {
         if (stored) alertedTypesRef.current = JSON.parse(stored);
         const storedHistory = await AsyncStorage.getItem("alertHistory");
         if (storedHistory) setAlertHistory(JSON.parse(storedHistory));
+
+        // Restore AQI history
+        const storedAQIHistory = await AsyncStorage.getItem("aqiHistory");
+        if (storedAQIHistory) setAqiHistory(JSON.parse(storedAQIHistory));
+
+        // Restore last known state — renders stale data instantly while
+        // the background refresh (triggered below) fetches fresh data.
+        const cachedCoords = await AsyncStorage.getItem("lastCoords");
+        const cachedLocationName =
+          await AsyncStorage.getItem("lastLocationName");
+        const cachedEnvData = await AsyncStorage.getItem("lastEnvData");
+        const cachedUpdatedAt = await AsyncStorage.getItem("lastUpdatedAt");
+
+        if (cachedCoords) setCoords(JSON.parse(cachedCoords));
+        if (cachedLocationName) setLocationName(cachedLocationName);
+        if (cachedEnvData) setData(JSON.parse(cachedEnvData));
+        if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
       } catch {
         // fail silently — not critical
       }
@@ -469,13 +619,17 @@ export default function HomeScreen() {
   // FIX: Only run initial check AFTER AsyncStorage has loaded
   // Prevents race condition where checkEnvironment runs before
   // alertedTypesRef is populated → causing duplicate notifications
+  // NOTE: If cached data was restored above, checkEnvironment runs silently
+  // (no loading spinner) and just refreshes data in the background.
   useEffect(() => {
     if (!alertsLoaded) return;
     const init = async () => {
       if (Platform.OS !== "web") {
         await Notifications.requestPermissionsAsync();
       }
-      await checkEnvironment();
+      // If we already have cached data, run silently (no spinner)
+      // so the user instantly sees last-known state while it refreshes.
+      await checkEnvironment(data !== null);
     };
     init();
   }, [alertsLoaded]);
@@ -500,19 +654,16 @@ export default function HomeScreen() {
         if (elapsed > APPSTATE_COOLDOWN_MS) {
           checkEnvironment(true);
         }
-        // Tell server app is now open → skip push
-        updateLocationOnServer(
-          coords?.latitude ?? 0,
-          coords?.longitude ?? 0,
-          true,
-        );
+        // Guard: only update if we have real coordinates — never send 0,0
+        if (coords) {
+          updateLocationOnServer(coords.latitude, coords.longitude, true);
+        }
       } else if (nextState === "background") {
         // App went to background — tell server to resume push
-        updateLocationOnServer(
-          coords?.latitude ?? 0,
-          coords?.longitude ?? 0,
-          false,
-        );
+        // Guard: only update if we have real coordinates — never send 0,0
+        if (coords) {
+          updateLocationOnServer(coords.latitude, coords.longitude, false);
+        }
       }
     };
 
@@ -524,7 +675,7 @@ export default function HomeScreen() {
     lat: number,
     lon: number,
     fallbackLocation?: { name?: string; region?: string },
-  ) => {
+  ): Promise<string> => {
     try {
       const res = await Location.reverseGeocodeAsync({
         latitude: lat,
@@ -539,33 +690,36 @@ export default function HomeScreen() {
         );
 
         if (parts.length > 0) {
-          setLocationName(parts.join(", "));
-          return;
+          const name = parts.join(", ");
+          setLocationName(name);
+          return name;
         }
       }
 
       // 🔁 Fallback to WeatherAPI location
       if (fallbackLocation?.name) {
-        setLocationName(
-          fallbackLocation.region
-            ? `${fallbackLocation.name}, ${fallbackLocation.region}`
-            : fallbackLocation.name,
-        );
-        return;
+        const name = fallbackLocation.region
+          ? `${fallbackLocation.name}, ${fallbackLocation.region}`
+          : fallbackLocation.name;
+        setLocationName(name);
+        return name;
       }
 
       // 🧭 Final fallback
-      setLocationName(`${lat.toFixed(2)}°, ${lon.toFixed(2)}°`);
+      const name = `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`;
+      setLocationName(name);
+      return name;
     } catch {
       if (fallbackLocation?.name) {
-        setLocationName(
-          fallbackLocation.region
-            ? `${fallbackLocation.name}, ${fallbackLocation.region}`
-            : fallbackLocation.name,
-        );
-      } else {
-        setLocationName(`${lat.toFixed(2)}°, ${lon.toFixed(2)}°`);
+        const name = fallbackLocation.region
+          ? `${fallbackLocation.name}, ${fallbackLocation.region}`
+          : fallbackLocation.name;
+        setLocationName(name);
+        return name;
       }
+      const name = `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`;
+      setLocationName(name);
+      return name;
     }
   };
 
@@ -645,7 +799,7 @@ export default function HomeScreen() {
       );
 
       // ✅ Always resolve location safely
-      await reverseGeocode(
+      const resolvedLocationName = await reverseGeocode(
         userCoords.latitude,
         userCoords.longitude,
         envData.location,
@@ -660,23 +814,45 @@ export default function HomeScreen() {
             "⚠️ Enable notifications in Settings to receive background alerts.",
           );
         } else {
-          await registerDeviceWithServer(
-            userCoords.latitude,
-            userCoords.longitude,
-          );
-
-          updateLocationOnServer(
-            userCoords.latitude,
-            userCoords.longitude,
-            true,
-          );
+          try {
+            await registerDeviceWithServer(
+              userCoords.latitude,
+              userCoords.longitude,
+            );
+            updateLocationOnServer(
+              userCoords.latitude,
+              userCoords.longitude,
+              true,
+            );
+          } catch (regErr: any) {
+            // Show a clear, visible error so the dev/user knows why
+            // the device isn't appearing in the backend dashboard.
+            setError(
+              `⚠️ Server registration failed: ${regErr?.message ?? "Check your EXPO_PUBLIC_SERVER_URL."}`,
+            );
+          }
         }
       } else {
-        updateLocationOnServer(userCoords.latitude, userCoords.longitude);
+        // silent = true means app is open (interval or AppState foreground)
+        // → pass appOpen: true so server skips push (app handles it locally)
+        updateLocationOnServer(userCoords.latitude, userCoords.longitude, true);
       }
 
       setData(envData);
-      setUpdatedAt(new Date());
+      const now = new Date();
+      setUpdatedAt(now);
+
+      // Persist last-known state so cold-starts show data immediately
+      AsyncStorage.setItem("lastCoords", JSON.stringify(userCoords)).catch(
+        () => {},
+      );
+      AsyncStorage.setItem("lastLocationName", resolvedLocationName).catch(
+        () => {},
+      );
+      AsyncStorage.setItem("lastEnvData", JSON.stringify(envData)).catch(
+        () => {},
+      );
+      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => {});
 
       const riskAlerts = evaluateRisk(envData);
       setAlerts(riskAlerts);
@@ -700,10 +876,28 @@ export default function HomeScreen() {
         setTrend(null);
       }
 
+      // Append to AQI history — keep last 24 entries
+      if (calculatedAQI !== null) {
+        setAqiHistory((prev) => {
+          const entry: AQIEntry = {
+            aqi: calculatedAQI,
+            time: new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          };
+          const updated = [...prev, entry].slice(-24);
+          AsyncStorage.setItem("aqiHistory", JSON.stringify(updated)).catch(
+            () => {},
+          );
+          return updated;
+        });
+      }
+
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
-    } catch (err) {
+    } catch (err: any) {
       // Even if weather fails, show coordinates instead of infinite loading
       if (!locationName && coords) {
         setLocationName(
@@ -712,7 +906,16 @@ export default function HomeScreen() {
       }
 
       if (!silent) {
-        setError("Could not fetch environmental data. Check your connection.");
+        // Show the correct message — location denial vs network failure are very different
+        if (err?.message?.toLowerCase().includes("location permission")) {
+          setError(
+            "📍 Location access denied. Please enable it in Settings → Apps → Enviro Monitor → Permissions.",
+          );
+        } else {
+          setError(
+            "Could not fetch environmental data. Check your connection.",
+          );
+        }
       }
     } finally {
       isCheckingRef.current = false;
@@ -745,12 +948,21 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {coords && (
-          <View style={s.coordBadge}>
-            <Text style={s.coordLine}>{coords.latitude.toFixed(3)}° N</Text>
-            <Text style={s.coordLine}>{coords.longitude.toFixed(3)}° E</Text>
-          </View>
-        )}
+        <View style={s.topRight}>
+          {coords && (
+            <View style={s.coordBadge}>
+              <Text style={s.coordLine}>{coords.latitude.toFixed(3)}° N</Text>
+              <Text style={s.coordLine}>{coords.longitude.toFixed(3)}° E</Text>
+            </View>
+          )}
+          <TouchableOpacity
+            style={s.savedBtn}
+            onPress={() => router.push("/(tabs)/saved" as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={s.savedBtnText}>📌</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* ══ ORB ══ */}
@@ -856,6 +1068,14 @@ export default function HomeScreen() {
       </View>
 
       {/* ══ FEEDBACK ══ */}
+      {bgLocationDenied && (
+        <View style={s.warnBox}>
+          <Text style={s.warnText}>
+            🔕 Background alerts disabled — grant "Allow all the time" location
+            access in Settings for notifications when app is closed.
+          </Text>
+        </View>
+      )}
       {loading && (
         <View style={s.loadRow}>
           <ActivityIndicator color={risk.color} size="small" />
@@ -879,6 +1099,19 @@ export default function HomeScreen() {
             width: "100%",
           }}
         >
+          {/* AQI History Chart */}
+          {aqiHistory.length >= 2 && (
+            <View style={s.card}>
+              <View style={s.cardHead}>
+                <Text style={s.cardLabel}>AQI HISTORY</Text>
+                <Text style={[s.cardAccent, { color: "#6B7280" }]}>
+                  last {aqiHistory.slice(-12).length} readings
+                </Text>
+              </View>
+              <AQIHistoryChart history={aqiHistory} />
+            </View>
+          )}
+
           {/* Gauge card */}
           <View style={s.card}>
             <View style={s.cardHead}>
@@ -1057,10 +1290,11 @@ export default function HomeScreen() {
         {updatedAt && (
           <Text style={s.footerText}>
             Updated ·{" "}
-            {updatedAt.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
+            {relativeTime ??
+              updatedAt.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
           </Text>
         )}
         {coords && (
@@ -1091,7 +1325,19 @@ const s = StyleSheet.create({
     alignItems: "flex-start",
     marginBottom: 44,
   },
-  topLeft: { gap: 6 },
+  topLeft: { gap: 6, flex: 1 },
+  topRight: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  savedBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  savedBtnText: { fontSize: 16 },
   appLabel: {
     fontSize: 9,
     letterSpacing: 3.5,
@@ -1215,6 +1461,22 @@ const s = StyleSheet.create({
     marginBottom: 20,
   },
   loadText: { fontSize: 12, letterSpacing: 1, fontWeight: "600" },
+  warnBox: {
+    backgroundColor: "rgba(251,191,36,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(251,191,36,0.22)",
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 12,
+    width: "100%",
+  },
+  warnText: {
+    color: "#FDE68A",
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 18,
+  },
   errBox: {
     backgroundColor: "rgba(239,68,68,0.1)",
     borderWidth: 1,
