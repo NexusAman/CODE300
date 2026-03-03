@@ -114,3 +114,16 @@ export const stopBackgroundLocation = async (): Promise<void> => {
     console.log("🛑 Background location stopped");
   }
 };
+
+// ─── Check Background Permission Status ──────────────────────────────────────
+// Returns true if background location permission is granted
+export const hasBackgroundLocationPermission = async (): Promise<boolean> => {
+  try {
+    const { status } = await Location.getBackgroundPermissionsAsync();
+    console.log("🔍 Background permission status:", status);
+    return status === "granted";
+  } catch (error) {
+    console.warn("⚠️ Background permission check failed:", error);
+    return false;
+  }
+};

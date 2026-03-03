@@ -13,7 +13,9 @@
       "bundleIdentifier": "com.anonymous.envriskalert",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Enviro Monitor needs your location to fetch real-time air quality and weather data for your area.",
-        "NSLocationAlwaysUsageDescription": "Enviro Monitor needs your location to monitor environmental conditions."
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Enviro Monitor needs continuous access to your location to monitor environmental conditions and send you alerts about dangerous air quality even when the app is closed.",
+        "NSLocationAlwaysUsageDescription": "Enviro Monitor needs continuous access to your location to monitor environmental conditions and send you alerts about dangerous air quality even when the app is closed.",
+        "UIBackgroundModes": ["location"]
       }
     },
     "android": {

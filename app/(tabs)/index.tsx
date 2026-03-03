@@ -8,7 +8,6 @@ import {
   Animated,
   AppState,
   AppStateStatus,
-  Dimensions,
   Platform,
   ScrollView,
   StyleSheet,
@@ -26,13 +25,12 @@ import {
 } from "../../src/services/fcmService";
 import {
   getUserLocation,
+  hasBackgroundLocationPermission,
   startBackgroundLocation,
 } from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
 import { EnvironmentalData } from "../../src/types/environment";
 import { calculateAQI } from "../../src/utils/aqi";
-
-const { width } = Dimensions.get("window");
 
 // ─── AQI Helpers ─────────────────────────────────────────────────────────────
 
@@ -130,6 +128,7 @@ const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
       duration: 1000,
       useNativeDriver: false,
     }).start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aqi]);
 
   const barWidth = widthAnim.interpolate({
@@ -427,15 +426,40 @@ export default function HomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
 
+  // 📍 Check background location permission status
+  const checkBackgroundPermission = async () => {
+    try {
+      console.log("🔍 Checking background permission...");
+      const hasPermission = await hasBackgroundLocationPermission();
+      console.log("✅ Background permission result:", hasPermission);
+
+      // Update UI state
+      setBgLocationDenied(!hasPermission);
+
+      // If permission is granted, ensure background tracking is running
+      if (hasPermission) {
+        try {
+          await startBackgroundLocation();
+          console.log("✅ Background location tracking started");
+          // Explicitly set denied to false after successful start
+          setBgLocationDenied(false);
+        } catch (err) {
+          console.warn("⚠️ Background location tracking failed:", err);
+          setBgLocationDenied(true);
+        }
+      } else {
+        console.log("❌ Background permission not granted");
+      }
+    } catch (error) {
+      console.error("❌ Permission check error:", error);
+      setBgLocationDenied(true);
+    }
+  };
+
   // 📍 Background location — register callback so the task can call
   // updateLocationOnServer even when the app is fully closed
   useEffect(() => {
-    // Start background tracking — if denied, show a subtle warning in UI
-    startBackgroundLocation()
-      .then(() => setBgLocationDenied(false))
-      .catch(() => {
-        setBgLocationDenied(true);
-      });
+    checkBackgroundPermission();
   }, []);
 
   // FIX: Load persisted alerted types from storage on app start
@@ -493,6 +517,7 @@ export default function HomeScreen() {
     );
     anim.start();
     return () => anim.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -512,6 +537,7 @@ export default function HomeScreen() {
         }),
       ]).start();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   // FIX: Only run initial check AFTER AsyncStorage has loaded
@@ -530,6 +556,7 @@ export default function HomeScreen() {
       await checkEnvironment(data !== null);
     };
     init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [alertsLoaded]);
 
   // FIX: Changed from 60s to 2 minutes — sweet spot for weather app.
@@ -540,6 +567,7 @@ export default function HomeScreen() {
     }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // FIX: Tell server when app goes background/foreground
@@ -552,6 +580,8 @@ export default function HomeScreen() {
         if (elapsed > APPSTATE_COOLDOWN_MS) {
           checkEnvironment(true);
         }
+        // Re-check background permission in case user granted it in Settings
+        checkBackgroundPermission();
         // Guard: only update if we have real coordinates — never send 0,0
         if (coords) {
           updateLocationOnServer(coords.latitude, coords.longitude, true);
@@ -567,6 +597,7 @@ export default function HomeScreen() {
 
     const sub = AppState.addEventListener("change", handleAppStateChange);
     return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coords]);
 
   const reverseGeocode = async (
@@ -691,13 +722,9 @@ export default function HomeScreen() {
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
-      // Retry background tracking after foreground location is confirmed.
-      // This clears stale warning state when user grants permission in Settings.
-      startBackgroundLocation()
-        .then(() => setBgLocationDenied(false))
-        .catch(() => {
-          setBgLocationDenied(true);
-        });
+      // Retry background permission check on each data fetch
+      // This ensures the warning banner stays in sync with actual permission state
+      checkBackgroundPermission();
 
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
