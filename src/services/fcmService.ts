@@ -27,6 +27,7 @@ const getClientAuthHeaders = () => {
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
 // getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
 let cachedToken: string | null = null;
+let tokenRequestInFlight: Promise<string | null> | null = null;
 
 const LOCATION_UPDATE_MIN_INTERVAL_MS = 45_000;
 const LOCATION_JITTER_THRESHOLD = 0.0001;
@@ -113,63 +114,76 @@ export const getFCMToken = async (options?: {
   // Return cached token immediately if available
   if (!options?.forceRefresh && cachedToken) return cachedToken;
 
-  try {
-    // Push notifications only work on real devices
-    if (!Device.isDevice) {
-      console.warn("Push notifications require a real device.");
-      return null;
-    }
-
-    if (Device.osName === "Android") {
-      await Notifications.setNotificationChannelAsync("default", {
-        name: "default",
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: "#34D399",
-      });
-    }
-
-    const { status: existingStatus } =
-      await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
-
-    if (existingStatus !== "granted") {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
-
-    if (finalStatus !== "granted") {
-      console.warn("Notification permission denied.");
-      cachedToken = null;
-      return null;
-    }
-
-    const projectId = getExpoProjectId();
-    if (!projectId) {
-      console.warn(
-        "Push token unavailable: missing projectId. Set EXPO_PUBLIC_PROJECT_ID or ensure EAS project config is present.",
-      );
-      return null;
-    }
-
-    // Get Expo push token — works as FCM token via Expo's push service
-    const tokenData = await Notifications.getExpoPushTokenAsync({
-      projectId,
-    });
-
-    if (!tokenData?.data) {
-      console.warn("Push token request returned an empty token.");
-      cachedToken = null;
-      return null;
-    }
-
-    cachedToken = tokenData.data; // ← cache it
-    return cachedToken;
-  } catch (err) {
-    console.warn("Failed to get FCM token:", err);
-    cachedToken = null;
-    return null;
+  if (!options?.forceRefresh && tokenRequestInFlight) {
+    return tokenRequestInFlight;
   }
+
+  const requestToken = async (): Promise<string | null> => {
+    try {
+      // Push notifications only work on real devices
+      if (!Device.isDevice) {
+        console.warn("Push notifications require a real device.");
+        return null;
+      }
+
+      if (Device.osName === "Android") {
+        await Notifications.setNotificationChannelAsync("default", {
+          name: "default",
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: "#34D399",
+        }).catch((error) => {
+          console.warn("Notification channel setup failed:", error);
+        });
+      }
+
+      const { status: existingStatus } =
+        await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== "granted") {
+        console.warn("Notification permission denied.");
+        cachedToken = null;
+        return null;
+      }
+
+      const projectId = getExpoProjectId();
+      if (!projectId) {
+        console.warn(
+          "Push token unavailable: missing projectId. Set EXPO_PUBLIC_PROJECT_ID or ensure EAS project config is present.",
+        );
+        return null;
+      }
+
+      // Get Expo push token — works as FCM token via Expo's push service
+      const tokenData = await Notifications.getExpoPushTokenAsync({
+        projectId,
+      });
+
+      if (!tokenData?.data) {
+        console.warn("Push token request returned an empty token.");
+        cachedToken = null;
+        return null;
+      }
+
+      cachedToken = tokenData.data;
+      return cachedToken;
+    } catch (err) {
+      console.warn("Failed to get FCM token:", err);
+      cachedToken = null;
+      return null;
+    }
+  };
+
+  tokenRequestInFlight = requestToken();
+  const token = await tokenRequestInFlight;
+  tokenRequestInFlight = null;
+  return token;
 };
 
 // ─── Register device with your server ────────────────────────────────────────

@@ -1,5 +1,6 @@
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { Linking, Platform } from "react-native";
 import { updateLocationOnServer } from "./fcmService";
 
 export const getUserLocation = async () => {
@@ -22,6 +23,7 @@ export const getUserLocation = async () => {
 // Task must be defined at TOP LEVEL of module (not inside a component).
 
 export const BACKGROUND_LOCATION_TASK = "background-location-task";
+let backgroundSettingsRedirected = false;
 
 // Callback registered by the app — calls updateLocationOnServer
 let _onLocationUpdate: ((lat: number, lon: number) => void) | null = null;
@@ -41,32 +43,58 @@ export const setBackgroundLocationCallback = (
   _onLocationUpdate = cb;
 };
 
-TaskManager.defineTask(
-  BACKGROUND_LOCATION_TASK,
-  async ({
-    data,
-    error,
-  }: {
-    data?: BackgroundTaskPayload;
-    error?: { message?: string } | null;
-  }) => {
-    if (error) {
-      console.warn("Background location task error:", error.message);
-      return;
-    }
-    if (data?.locations?.length) {
-      const { latitude, longitude } = data.locations[0].coords;
-      updateLocationOnServer(latitude, longitude, false).catch((err) => {
-        console.warn("Background location server sync failed:", err);
-      });
-      _onLocationUpdate?.(latitude, longitude);
-    }
-  },
-);
+const ensureBackgroundTaskRegistered = () => {
+  try {
+    const alreadyDefined = TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK);
+    if (alreadyDefined) return;
+
+    TaskManager.defineTask(
+      BACKGROUND_LOCATION_TASK,
+      async ({
+        data,
+        error,
+      }: {
+        data?: BackgroundTaskPayload;
+        error?: { message?: string } | null;
+      }) => {
+        if (error) {
+          console.warn("Background location task error:", error.message);
+          return;
+        }
+        if (data?.locations?.length) {
+          const { latitude, longitude } = data.locations[0].coords;
+          updateLocationOnServer(latitude, longitude, false).catch((err) => {
+            console.warn("Background location server sync failed:", err);
+          });
+          _onLocationUpdate?.(latitude, longitude);
+        }
+      },
+    );
+  } catch (error) {
+    console.warn("Background location task registration skipped:", error);
+  }
+};
+
+ensureBackgroundTaskRegistered();
 
 // ─── Start / Stop Background Location ────────────────────────────────────────
 
 export const startBackgroundLocation = async (): Promise<void> => {
+  const servicesEnabled = await Location.hasServicesEnabledAsync().catch(
+    () => false,
+  );
+  if (!servicesEnabled) {
+    throw new Error("Location services are disabled on this device.");
+  }
+
+  const backgroundAvailable =
+    await Location.isBackgroundLocationAvailableAsync().catch(() => false);
+  if (!backgroundAvailable) {
+    throw new Error(
+      "Background location is not available in this runtime. Use a development/production build.",
+    );
+  }
+
   const { status: fgStatus } = await Location.getForegroundPermissionsAsync();
   if (fgStatus !== "granted") {
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -77,9 +105,18 @@ export const startBackgroundLocation = async (): Promise<void> => {
     }
   }
 
-  const { status } = await Location.requestBackgroundPermissionsAsync();
+  const { status, canAskAgain } =
+    await Location.requestBackgroundPermissionsAsync();
   if (status !== "granted") {
-    throw new Error("Background location permission denied.");
+    if (Platform.OS === "android" && !backgroundSettingsRedirected) {
+      backgroundSettingsRedirected = true;
+      if (!canAskAgain) {
+        await Linking.openSettings().catch(() => {});
+      }
+    }
+    throw new Error(
+      "Background location permission denied. Please set Location to 'Allow all the time' in app settings.",
+    );
   }
 
   const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(

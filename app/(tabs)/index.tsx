@@ -459,24 +459,18 @@ export default function HomeScreen() {
       const status = await getBackgroundLocationPermissionStatus();
       const hasPermission = status === "granted";
 
-      if (!hasPermission) {
-        backgroundLocationStartedRef.current = false;
-        setBgLocationDenied((prev) => (prev !== true ? true : prev));
-        return;
-      }
-
-      setBgLocationDenied((prev) => (prev !== false ? false : prev));
-
       const running = await isBackgroundLocationRunning();
       if (running) {
         backgroundLocationStartedRef.current = true;
+        setBgLocationDenied((prev) => (prev !== false ? false : prev));
         return;
       }
 
-      if (!backgroundLocationStartedRef.current) {
+      if (!backgroundLocationStartedRef.current || !hasPermission) {
         try {
           await startBackgroundLocation();
           backgroundLocationStartedRef.current = true;
+          setBgLocationDenied((prev) => (prev !== false ? false : prev));
           if (coordsForSync) {
             updateLocationOnServer(
               coordsForSync.latitude,
@@ -485,7 +479,7 @@ export default function HomeScreen() {
             ).catch(() => {});
           }
         } catch (err) {
-          // Startup errors should not show false permission denial banner
+          setBgLocationDenied((prev) => (prev !== true ? true : prev));
           console.warn("⚠️ Background location start failed:", err);
           backgroundLocationStartedRef.current = false;
         }

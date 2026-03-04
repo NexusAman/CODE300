@@ -6,7 +6,6 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
-  Dimensions,
   Image,
   StyleSheet,
   Text,
@@ -15,10 +14,8 @@ import {
 } from "react-native";
 import "react-native-reanimated";
 
-const { width, height } = Dimensions.get("window");
-
 // Keep native splash visible until we're ready to animate!
-SplashScreen.preventAutoHideAsync();
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -89,6 +86,7 @@ function AnimatedSplash({ onFinish }: { onFinish: () => void }) {
         useNativeDriver: true,
       }),
     ]).start(() => onFinish());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const ring1Scale = ring1Anim.interpolate({
@@ -344,7 +342,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
-    SplashScreen.hideAsync();
+    SplashScreen.hideAsync().catch(() => {});
 
     // Check if onboarding has been seen before
     AsyncStorage.getItem("hasSeenOnboarding")
@@ -362,7 +360,7 @@ export default function RootLayout() {
     return () => {
       notifResponseListener.current?.remove();
     };
-  }, []);
+  }, [router]);
 
   return (
     <>

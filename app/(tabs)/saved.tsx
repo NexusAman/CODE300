@@ -289,7 +289,7 @@ export default function SavedLocationsScreen() {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   // Debounced search — calls WeatherAPI's search endpoint
   useEffect(() => {
@@ -309,6 +309,12 @@ export default function SavedLocationsScreen() {
         setSearching(false);
       }
     }, 500);
+
+    return () => {
+      if (searchTimeout.current) {
+        clearTimeout(searchTimeout.current);
+      }
+    };
   }, [query]);
 
   const handleAdd = async (item: WeatherSearchResult) => {
