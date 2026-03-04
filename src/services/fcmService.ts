@@ -8,6 +8,7 @@ import * as Notifications from "expo-notifications";
 // Falls back to the real production URL so the app works even without the env var set.
 const SERVER_URL =
   process.env.EXPO_PUBLIC_SERVER_URL || "https://enviro-server.onrender.com";
+const CLIENT_API_KEY = process.env.EXPO_PUBLIC_CLIENT_API_KEY;
 
 // Only block if still the original placeholder — never block the real server URL.
 const IS_PLACEHOLDER_URL = SERVER_URL === "https://your-app.onrender.com";
@@ -17,6 +18,11 @@ const SERVER_RETRY_COUNT = 2;
 const serverApi = axios.create({
   timeout: SERVER_TIMEOUT_MS,
 });
+
+const getClientAuthHeaders = () => {
+  if (!CLIENT_API_KEY) return undefined;
+  return { "x-client-key": CLIENT_API_KEY };
+};
 
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
 // getExpoPushTokenAsync() can fail on rapid app opens — cache it after first success
@@ -58,6 +64,12 @@ const getExpoProjectId = (): string | undefined => {
     return expoExtraProjectId;
   }
 
+  const manifestProjectId = (Constants as any)?.manifest2?.extra?.eas
+    ?.projectId;
+  if (typeof manifestProjectId === "string" && manifestProjectId.length > 0) {
+    return manifestProjectId;
+  }
+
   return undefined;
 };
 
@@ -79,7 +91,9 @@ const postWithRetry = async <TBody extends object>(
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      return await serverApi.post(url, body);
+      return await serverApi.post(url, body, {
+        headers: getClientAuthHeaders(),
+      });
     } catch (error) {
       lastError = error;
       if (attempt >= retries || !isRetriableAxiosError(error)) {
@@ -93,15 +107,26 @@ const postWithRetry = async <TBody extends object>(
 };
 
 // ─── Get FCM token from Expo ──────────────────────────────────────────────────
-export const getFCMToken = async (): Promise<string | null> => {
+export const getFCMToken = async (options?: {
+  forceRefresh?: boolean;
+}): Promise<string | null> => {
   // Return cached token immediately if available
-  if (cachedToken) return cachedToken;
+  if (!options?.forceRefresh && cachedToken) return cachedToken;
 
   try {
     // Push notifications only work on real devices
     if (!Device.isDevice) {
       console.warn("Push notifications require a real device.");
       return null;
+    }
+
+    if (Device.osName === "Android") {
+      await Notifications.setNotificationChannelAsync("default", {
+        name: "default",
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: "#34D399",
+      });
     }
 
     const { status: existingStatus } =
@@ -115,6 +140,7 @@ export const getFCMToken = async (): Promise<string | null> => {
 
     if (finalStatus !== "granted") {
       console.warn("Notification permission denied.");
+      cachedToken = null;
       return null;
     }
 
@@ -133,6 +159,7 @@ export const getFCMToken = async (): Promise<string | null> => {
 
     if (!tokenData?.data) {
       console.warn("Push token request returned an empty token.");
+      cachedToken = null;
       return null;
     }
 
@@ -140,6 +167,7 @@ export const getFCMToken = async (): Promise<string | null> => {
     return cachedToken;
   } catch (err) {
     console.warn("Failed to get FCM token:", err);
+    cachedToken = null;
     return null;
   }
 };

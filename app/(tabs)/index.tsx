@@ -1,6 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
-import * as Notifications from "expo-notifications";
 import { useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -24,8 +23,9 @@ import {
   updateLocationOnServer,
 } from "../../src/services/fcmService";
 import {
+  getBackgroundLocationPermissionStatus,
   getUserLocation,
-  hasBackgroundLocationPermission,
+  isBackgroundLocationRunning,
   startBackgroundLocation,
 } from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
@@ -402,12 +402,23 @@ export default function HomeScreen() {
   const isCheckingRef = useRef(false); // ⛔ prevents overlapping checks
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
 
-  // 🔕 Background location permission denied — show subtle warning in UI
-  const [bgLocationDenied, setBgLocationDenied] = useState(false);
+  // 🔕 null = not yet checked, false = ok, true = denied
+  // Starting as null prevents the banner from flashing on first render
+  // before the permission check has actually completed.
+  const [bgLocationDenied, setBgLocationDenied] = useState<boolean | null>(
+    null,
+  );
 
   // ⏱ Last fetch timestamp — used for AppState cooldown only
   // Prevents spam API calls when user rapidly switches apps
   const lastFetchedAt = useRef<number | null>(null);
+
+  // 🔐 Background permission tracking — prevents redundant checks & starts
+  const lastPermissionCheckRef = useRef<number>(0);
+  const backgroundLocationStartedRef = useRef<boolean>(false);
+  const PERMISSION_CHECK_COOLDOWN_MS = 60 * 1000; // Check at most every 60 seconds
+  const nextRegistrationAllowedAtRef = useRef<number>(0);
+  const REGISTRATION_FAILURE_BACKOFF_MS = 30 * 1000;
 
   //  Relative time — updates every 30s automatically
   const [relativeTime, setRelativeTime] = useState<string | null>(null);
@@ -426,41 +437,119 @@ export default function HomeScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(24)).current;
 
-  // 📍 Check background location permission status
-  const checkBackgroundPermission = async () => {
+  // 📍 Check background location permission status and sync with server
+  const checkBackgroundPermission = async (
+    coordsForSync?: {
+      latitude: number;
+      longitude: number;
+    },
+    force: boolean = false,
+  ) => {
+    // Debounce: prevent checking too frequently (causes notification flicker)
+    const now = Date.now();
+    if (
+      !force &&
+      now - lastPermissionCheckRef.current < PERMISSION_CHECK_COOLDOWN_MS
+    ) {
+      return;
+    }
+    lastPermissionCheckRef.current = now;
+
     try {
-      console.log("🔍 Checking background permission...");
-      const hasPermission = await hasBackgroundLocationPermission();
-      console.log("✅ Background permission result:", hasPermission);
+      const status = await getBackgroundLocationPermissionStatus();
+      const hasPermission = status === "granted";
 
-      // Update UI state
-      setBgLocationDenied(!hasPermission);
+      if (!hasPermission) {
+        backgroundLocationStartedRef.current = false;
+        setBgLocationDenied((prev) => (prev !== true ? true : prev));
+        return;
+      }
 
-      // If permission is granted, ensure background tracking is running
-      if (hasPermission) {
+      setBgLocationDenied((prev) => (prev !== false ? false : prev));
+
+      const running = await isBackgroundLocationRunning();
+      if (running) {
+        backgroundLocationStartedRef.current = true;
+        return;
+      }
+
+      if (!backgroundLocationStartedRef.current) {
         try {
           await startBackgroundLocation();
-          console.log("✅ Background location tracking started");
-          // Explicitly set denied to false after successful start
-          setBgLocationDenied(false);
+          backgroundLocationStartedRef.current = true;
+          if (coordsForSync) {
+            updateLocationOnServer(
+              coordsForSync.latitude,
+              coordsForSync.longitude,
+              true,
+            ).catch(() => {});
+          }
         } catch (err) {
-          console.warn("⚠️ Background location tracking failed:", err);
-          setBgLocationDenied(true);
+          // Startup errors should not show false permission denial banner
+          console.warn("⚠️ Background location start failed:", err);
+          backgroundLocationStartedRef.current = false;
         }
-      } else {
-        console.log("❌ Background permission not granted");
       }
     } catch (error) {
       console.error("❌ Permission check error:", error);
-      setBgLocationDenied(true);
+      // Keep previous banner state to avoid flicker on transient API failures
     }
   };
 
-  // 📍 Background location — register callback so the task can call
-  // updateLocationOnServer even when the app is fully closed
-  useEffect(() => {
-    checkBackgroundPermission();
-  }, []);
+  const attemptDeviceRegistration = async (
+    latitude: number,
+    longitude: number,
+    showUiErrors: boolean,
+  ) => {
+    const now = Date.now();
+    if (now < nextRegistrationAllowedAtRef.current) {
+      return;
+    }
+
+    let token = await getFCMToken();
+    if (!token) {
+      token = await getFCMToken({ forceRefresh: true });
+    }
+
+    if (!token) {
+      if (showUiErrors) {
+        setError(
+          "⚠️ Enable notifications in Settings to receive background alerts.",
+        );
+      }
+      nextRegistrationAllowedAtRef.current =
+        now + REGISTRATION_FAILURE_BACKOFF_MS;
+      return;
+    }
+
+    try {
+      await registerDeviceWithServer(latitude, longitude);
+      updateLocationOnServer(latitude, longitude, true);
+      nextRegistrationAllowedAtRef.current = 0;
+    } catch (regErr: unknown) {
+      const authMismatch =
+        typeof regErr === "object" &&
+        regErr !== null &&
+        "response" in regErr &&
+        (regErr as { response?: { status?: number } }).response?.status === 401;
+
+      if (showUiErrors) {
+        const message = authMismatch
+          ? "Client key mismatch. Ensure EXPO_PUBLIC_CLIENT_API_KEY equals server CLIENT_API_KEY."
+          : regErr instanceof Error
+            ? regErr.message
+            : "Check your EXPO_PUBLIC_SERVER_URL.";
+        setError(`⚠️ Server registration failed: ${message}`);
+      }
+      nextRegistrationAllowedAtRef.current =
+        Date.now() + REGISTRATION_FAILURE_BACKOFF_MS;
+    }
+  };
+
+  // 📍 Background location — initial check is deferred to checkEnvironment
+  // so real coords are available when the server is updated (atomic sync).
+  // No mount-level call here — avoids burning the 60s cooldown before coords exist,
+  // which would silently skip the coordinated server update inside checkEnvironment.
 
   // FIX: Load persisted alerted types from storage on app start
   // Prevents duplicate alerts/history when app is closed and reopened
@@ -548,9 +637,6 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!alertsLoaded) return;
     const init = async () => {
-      if (Platform.OS !== "web") {
-        await Notifications.requestPermissionsAsync();
-      }
       // If we already have cached data, run silently (no spinner)
       // so the user instantly sees last-known state while it refreshes.
       await checkEnvironment(data !== null);
@@ -580,8 +666,9 @@ export default function HomeScreen() {
         if (elapsed > APPSTATE_COOLDOWN_MS) {
           checkEnvironment(true);
         }
-        // Re-check background permission in case user granted it in Settings
-        checkBackgroundPermission();
+        // Re-check background permission on every foreground transition.
+        // Force bypass cooldown to catch Settings revocations immediately.
+        checkBackgroundPermission(coords ?? undefined, true);
         // Guard: only update if we have real coordinates — never send 0,0
         if (coords) {
           updateLocationOnServer(coords.latitude, coords.longitude, true);
@@ -598,7 +685,7 @@ export default function HomeScreen() {
     const sub = AppState.addEventListener("change", handleAppStateChange);
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coords]);
+  }, [coords, bgLocationDenied]);
 
   const reverseGeocode = async (
     lat: number,
@@ -722,10 +809,6 @@ export default function HomeScreen() {
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
-      // Retry background permission check on each data fetch
-      // This ensures the warning banner stays in sync with actual permission state
-      checkBackgroundPermission();
-
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
         userCoords.longitude,
@@ -738,38 +821,15 @@ export default function HomeScreen() {
         envData.location,
       );
 
-      // Register/update device with server
-      if (!silent) {
-        const token = await getFCMToken();
+      await attemptDeviceRegistration(
+        userCoords.latitude,
+        userCoords.longitude,
+        !silent,
+      );
 
-        if (!token) {
-          setError(
-            "⚠️ Enable notifications in Settings to receive background alerts.",
-          );
-        } else {
-          try {
-            await registerDeviceWithServer(
-              userCoords.latitude,
-              userCoords.longitude,
-            );
-            updateLocationOnServer(
-              userCoords.latitude,
-              userCoords.longitude,
-              true,
-            );
-          } catch (regErr: unknown) {
-            const message =
-              regErr instanceof Error
-                ? regErr.message
-                : "Check your EXPO_PUBLIC_SERVER_URL.";
-            // Show a clear, visible error so the dev/user knows why
-            // the device isn't appearing in the backend dashboard.
-            setError(`⚠️ Server registration failed: ${message}`);
-          }
-        }
-      } else {
-        // silent = true means app is open (interval or AppState foreground)
-        // → pass appOpen: true so server skips push (app handles it locally)
+      // silent = true means app is open (interval or AppState foreground)
+      // → pass appOpen: true so server skips push (app handles it locally)
+      if (silent) {
         updateLocationOnServer(userCoords.latitude, userCoords.longitude, true);
       }
 
@@ -788,6 +848,10 @@ export default function HomeScreen() {
         () => {},
       );
       AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => {});
+
+      // Keep permission state synchronized even after prior success.
+      // Cooldown inside checkBackgroundPermission prevents thrashing.
+      checkBackgroundPermission(userCoords);
 
       const riskAlerts = evaluateRisk(envData);
       setAlerts(riskAlerts);
@@ -986,7 +1050,7 @@ export default function HomeScreen() {
       </View>
 
       {/* ══ FEEDBACK ══ */}
-      {bgLocationDenied && (
+      {bgLocationDenied === true && (
         <View style={s.warnBox}>
           <Text style={s.warnText}>
             🔕 Background alerts disabled — grant Allow all the time location

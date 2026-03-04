@@ -127,3 +127,23 @@ export const hasBackgroundLocationPermission = async (): Promise<boolean> => {
     return false;
   }
 };
+
+export const getBackgroundLocationPermissionStatus =
+  async (): Promise<Location.PermissionStatus> => {
+    try {
+      const { status } = await Location.getBackgroundPermissionsAsync();
+      return status;
+    } catch {
+      return Location.PermissionStatus.UNDETERMINED;
+    }
+  };
+
+export const isBackgroundLocationRunning = async (): Promise<boolean> => {
+  try {
+    return await Location.hasStartedLocationUpdatesAsync(
+      BACKGROUND_LOCATION_TASK,
+    );
+  } catch {
+    return false;
+  }
+};

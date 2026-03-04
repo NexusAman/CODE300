@@ -18,25 +18,21 @@ export const evaluateRisk = (
   const visibility = data?.current?.vis_km;
   const wind = data?.current?.wind_kph;
 
-  if (pm25 == null || uv == null || temp == null || visibility == null) {
-    return alerts;
-  }
-
   // ─── Air Quality (PM2.5) ──────────────────────────────────────────────────
   // Only highest applicable tier fires — type includes tier for correct deduplication
-  if (pm25 > RISK_LIMITS.PM25_DANGER) {
+  if (pm25 != null && pm25 > RISK_LIMITS.PM25_DANGER) {
     alerts.push({
       type: "AirQuality_danger",
       severity: "danger",
       message: `🫁 Hazardous air — PM2.5 at ${pm25.toFixed(1)} µg/m³. Stay indoors, avoid all outdoor activity.`,
     });
-  } else if (pm25 > RISK_LIMITS.PM25_SEVERE) {
+  } else if (pm25 != null && pm25 > RISK_LIMITS.PM25_SEVERE) {
     alerts.push({
       type: "AirQuality_severe",
       severity: "severe",
       message: `😷 Unhealthy air — PM2.5 at ${pm25.toFixed(1)} µg/m³. Wear a mask outdoors.`,
     });
-  } else if (pm25 > RISK_LIMITS.PM25_WARNING) {
+  } else if (pm25 != null && pm25 > RISK_LIMITS.PM25_WARNING) {
     alerts.push({
       type: "AirQuality_warning",
       severity: "warning",
@@ -45,13 +41,13 @@ export const evaluateRisk = (
   }
 
   // ─── UV Index ─────────────────────────────────────────────────────────────
-  if (uv > RISK_LIMITS.UV_DANGER) {
+  if (uv != null && uv > RISK_LIMITS.UV_DANGER) {
     alerts.push({
       type: "UV_danger",
       severity: "danger",
       message: `☀️ Extreme UV index (${uv}). Avoid direct sun, use SPF 50+.`,
     });
-  } else if (uv > RISK_LIMITS.UV_WARNING) {
+  } else if (uv != null && uv > RISK_LIMITS.UV_WARNING) {
     alerts.push({
       type: "UV_warning",
       severity: "warning",
@@ -60,13 +56,13 @@ export const evaluateRisk = (
   }
 
   // ─── Temperature ──────────────────────────────────────────────────────────
-  if (temp > RISK_LIMITS.TEMP_DANGER) {
+  if (temp != null && temp > RISK_LIMITS.TEMP_DANGER) {
     alerts.push({
       type: "Temp_danger",
       severity: "danger",
       message: `🌡 Extreme heat — ${temp}°C. Risk of heatstroke. Stay hydrated and indoors.`,
     });
-  } else if (temp > RISK_LIMITS.TEMP_WARNING) {
+  } else if (temp != null && temp > RISK_LIMITS.TEMP_WARNING) {
     alerts.push({
       type: "Temp_warning",
       severity: "warning",
@@ -75,13 +71,16 @@ export const evaluateRisk = (
   }
 
   // ─── Visibility ───────────────────────────────────────────────────────────
-  if (visibility < RISK_LIMITS.VISIBILITY_DANGER) {
+  if (visibility != null && visibility < RISK_LIMITS.VISIBILITY_DANGER) {
     alerts.push({
       type: "Visibility_danger",
       severity: "danger",
       message: `🌫 Very poor visibility — ${visibility} km. Avoid driving if possible.`,
     });
-  } else if (visibility < RISK_LIMITS.VISIBILITY_WARNING) {
+  } else if (
+    visibility != null &&
+    visibility < RISK_LIMITS.VISIBILITY_WARNING
+  ) {
     alerts.push({
       type: "Visibility_warning",
       severity: "warning",
