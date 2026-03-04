@@ -5,17 +5,19 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
-  Animated,
-  Image,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    Animated,
+    Image,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import "react-native-reanimated";
 
 // Keep native splash visible until we're ready to animate!
-SplashScreen.preventAutoHideAsync().catch(() => { });
+try {
+  SplashScreen.preventAutoHideAsync();
+} catch {}
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -173,7 +175,7 @@ const sp = StyleSheet.create({
   ring: {
     position: "absolute",
     borderRadius: 999,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: "#34D399",
   },
   ring1: {
@@ -249,7 +251,7 @@ function OnboardingOverlay({ onDone }: { onDone: () => void }) {
         }).start();
       });
     } else {
-      AsyncStorage.setItem("hasSeenOnboarding", "true").catch(() => { });
+      AsyncStorage.setItem("hasSeenOnboarding", "true").catch(() => {});
       onDone();
     }
   };
@@ -342,14 +344,14 @@ export default function RootLayout() {
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
-    SplashScreen.hideAsync().catch(() => { });
+    SplashScreen.hideAsync().catch(() => {});
 
     // Check if onboarding has been seen before
     AsyncStorage.getItem("hasSeenOnboarding")
       .then((val) => {
         if (!val) setShowOnboarding(true);
       })
-      .catch(() => { });
+      .catch(() => {});
 
     // Handle notification taps — bring user to home screen
     notifResponseListener.current =
