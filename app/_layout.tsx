@@ -5,19 +5,17 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
-    Animated,
-    Image,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  Animated,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import "react-native-reanimated";
 
 // Keep native splash visible until we're ready to animate!
-try {
-  SplashScreen.preventAutoHideAsync();
-} catch {}
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -175,7 +173,7 @@ const sp = StyleSheet.create({
   ring: {
     position: "absolute",
     borderRadius: 999,
-    borderWidth: 1.5,
+    borderWidth: 1,
     borderColor: "#34D399",
   },
   ring1: {
@@ -194,8 +192,8 @@ const sp = StyleSheet.create({
     borderColor: "#34D39915",
   },
   logo: {
-    width: 160,
-    height: 160,
+    width: 120,
+    height: 120,
   },
   appName: {
     fontSize: 13,
