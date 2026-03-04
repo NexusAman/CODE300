@@ -2,7 +2,7 @@
   "expo": {
     "name": "Enviro Monitor",
     "slug": "env-risk-alert",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "envriskalert",
@@ -15,7 +15,9 @@
         "NSLocationWhenInUseUsageDescription": "Enviro Monitor needs your location to fetch real-time air quality and weather data for your area.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Enviro Monitor needs continuous access to your location to monitor environmental conditions and send you alerts about dangerous air quality even when the app is closed.",
         "NSLocationAlwaysUsageDescription": "Enviro Monitor needs continuous access to your location to monitor environmental conditions and send you alerts about dangerous air quality even when the app is closed.",
-        "UIBackgroundModes": ["location"]
+        "UIBackgroundModes": [
+          "location"
+        ]
       }
     },
     "android": {

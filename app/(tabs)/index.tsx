@@ -35,7 +35,7 @@ import { calculateAQI } from "../../src/utils/aqi";
 // ─── AQI Helpers ─────────────────────────────────────────────────────────────
 
 const getAQILabel = (aqi: number | undefined) => {
-  if (!aqi) return "Unknown";
+  if (aqi == null) return "Unknown";
   const labels = [
     "",
     "Good",
@@ -60,7 +60,7 @@ type RiskConfig = {
 };
 
 const getRiskConfig = (realAQI: number | null): RiskConfig => {
-  if (!realAQI)
+  if (realAQI == null)
     return {
       level: "UNKNOWN",
       color: "#6B7280",
@@ -401,6 +401,7 @@ export default function HomeScreen() {
   const previousAQIRef = useRef<number | null>(null);
   const isCheckingRef = useRef(false); // ⛔ prevents overlapping checks
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
+  const hasCachedDataRef = useRef(false); // tracks if cached data was restored
 
   // 🔕 null = not yet checked, false = ok, true = denied
   // Starting as null prevents the banner from flashing on first render
@@ -476,7 +477,7 @@ export default function HomeScreen() {
               coordsForSync.latitude,
               coordsForSync.longitude,
               true,
-            ).catch(() => {});
+            ).catch(() => { });
           }
         } catch (err) {
           setBgLocationDenied((prev) => (prev !== true ? true : prev));
@@ -567,7 +568,10 @@ export default function HomeScreen() {
 
         if (cachedCoords) setCoords(JSON.parse(cachedCoords));
         if (cachedLocationName) setLocationName(cachedLocationName);
-        if (cachedEnvData) setData(JSON.parse(cachedEnvData));
+        if (cachedEnvData) {
+          setData(JSON.parse(cachedEnvData));
+          hasCachedDataRef.current = true;
+        }
         if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
       } catch {
         // fail silently — not critical
@@ -579,7 +583,7 @@ export default function HomeScreen() {
 
   const epaIndex = data?.current?.air_quality?.["us-epa-index"];
   const pm25 = data?.current?.air_quality?.pm2_5;
-  const realAQI = pm25 ? calculateAQI(pm25) : null;
+  const realAQI = pm25 != null ? calculateAQI(pm25) : null;
   const risk = getRiskConfig(realAQI);
 
   // Animation
@@ -633,7 +637,7 @@ export default function HomeScreen() {
     const init = async () => {
       // If we already have cached data, run silently (no spinner)
       // so the user instantly sees last-known state while it refreshes.
-      await checkEnvironment(data !== null);
+      await checkEnvironment(!hasCachedDataRef.current);
     };
     init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -754,29 +758,24 @@ export default function HomeScreen() {
       AsyncStorage.setItem(
         "alertedTypes",
         JSON.stringify(alertedTypesRef.current),
-      ).catch(() => {});
+      ).catch(() => { });
 
       // 📜 Save only severe/danger to history — warnings show in UI only
       const severeAndAbove = newAlerts.filter(
         (a) => a.severity === "severe" || a.severity === "danger",
       );
       if (severeAndAbove.length > 0) {
-        severeAndAbove.forEach((a) => {
-          setAlertHistory((prev) => {
-            const updated = [
-              {
-                message: a.message,
-                time: new Date().toLocaleTimeString(),
-                severity: a.severity,
-              },
-              ...prev.slice(0, 9),
-            ];
-            // FIX: Persist history so it survives app restarts
-            AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
-              () => {},
-            );
-            return updated;
-          });
+        setAlertHistory((prev) => {
+          const newItems = severeAndAbove.map((a) => ({
+            message: a.message,
+            time: new Date().toLocaleTimeString(),
+            severity: a.severity,
+          }));
+          const updated = [...newItems, ...prev].slice(0, 10);
+          AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
+            () => { },
+          );
+          return updated;
         });
       }
     }
@@ -789,7 +788,7 @@ export default function HomeScreen() {
     AsyncStorage.setItem(
       "alertedTypes",
       JSON.stringify(alertedTypesRef.current),
-    ).catch(() => {});
+    ).catch(() => { });
   };
 
   const checkEnvironment = async (silent = false) => {
@@ -833,15 +832,15 @@ export default function HomeScreen() {
 
       // Persist last-known state so cold-starts show data immediately
       AsyncStorage.setItem("lastCoords", JSON.stringify(userCoords)).catch(
-        () => {},
+        () => { },
       );
       AsyncStorage.setItem("lastLocationName", resolvedLocationName).catch(
-        () => {},
+        () => { },
       );
       AsyncStorage.setItem("lastEnvData", JSON.stringify(envData)).catch(
-        () => {},
+        () => { },
       );
-      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => {});
+      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => { });
 
       // Keep permission state synchronized even after prior success.
       // Cooldown inside checkBackgroundPermission prevents thrashing.
@@ -851,7 +850,7 @@ export default function HomeScreen() {
       setAlerts(riskAlerts);
 
       const pm25Value = envData?.current?.air_quality?.pm2_5;
-      const calculatedAQI = pm25Value ? calculateAQI(pm25Value) : null;
+      const calculatedAQI = pm25Value != null ? calculateAQI(pm25Value) : null;
 
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
         if (calculatedAQI > previousAQIRef.current + 5) {

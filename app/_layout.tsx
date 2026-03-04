@@ -15,7 +15,7 @@ import {
 import "react-native-reanimated";
 
 // Keep native splash visible until we're ready to animate!
-SplashScreen.preventAutoHideAsync().catch(() => {});
+SplashScreen.preventAutoHideAsync().catch(() => { });
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -249,7 +249,7 @@ function OnboardingOverlay({ onDone }: { onDone: () => void }) {
         }).start();
       });
     } else {
-      AsyncStorage.setItem("hasSeenOnboarding", "true").catch(() => {});
+      AsyncStorage.setItem("hasSeenOnboarding", "true").catch(() => { });
       onDone();
     }
   };
@@ -342,14 +342,14 @@ export default function RootLayout() {
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
-    SplashScreen.hideAsync().catch(() => {});
+    SplashScreen.hideAsync().catch(() => { });
 
     // Check if onboarding has been seen before
     AsyncStorage.getItem("hasSeenOnboarding")
       .then((val) => {
         if (!val) setShowOnboarding(true);
       })
-      .catch(() => {});
+      .catch(() => { });
 
     // Handle notification taps — bring user to home screen
     notifResponseListener.current =
@@ -366,11 +366,6 @@ export default function RootLayout() {
     <>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="onboarding" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="modal"
-          options={{ presentation: "modal", title: "Modal" }}
-        />
       </Stack>
       <StatusBar style="light" />
 

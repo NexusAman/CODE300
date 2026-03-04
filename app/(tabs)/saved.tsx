@@ -318,6 +318,19 @@ export default function SavedLocationsScreen() {
   }, [query]);
 
   const handleAdd = async (item: WeatherSearchResult) => {
+    // Prevent duplicate locations with same lat/lon
+    const existing = await getSavedLocations();
+    const isDuplicate = existing.some(
+      (l) =>
+        Math.abs(l.latitude - item.lat) < 0.001 &&
+        Math.abs(l.longitude - item.lon) < 0.001,
+    );
+    if (isDuplicate) {
+      setQuery("");
+      setSearchResults([]);
+      return;
+    }
+
     const loc: SavedLocation = {
       id: generateId(),
       name: item.name,
@@ -365,8 +378,8 @@ export default function SavedLocationsScreen() {
       {/* Search results */}
       {searchResults.length > 0 && (
         <View style={s.resultsBox}>
-          {searchResults.map((item, i) => (
-            <SearchResultItem key={i} item={item} onAdd={handleAdd} />
+          {searchResults.map((item) => (
+            <SearchResultItem key={`${item.lat},${item.lon}`} item={item} onAdd={handleAdd} />
           ))}
         </View>
       )}
