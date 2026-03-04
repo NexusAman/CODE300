@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "949764821829",
+    "project_id": "enviro-monitor-ee157",
+    "storage_bucket": "enviro-monitor-ee157.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:949764821829:android:fb3f9910a6f03a0eaa642c",
+        "android_client_info": {
+          "package_name": "com.anonymous.envriskalert"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCG5MsY81w6z3T1XG4tbsWwW3BSgRG32OM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
