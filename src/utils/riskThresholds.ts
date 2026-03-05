@@ -24,4 +24,24 @@ export const RISK_LIMITS = {
   WIND_WARNING: 40,
   WIND_SEVERE: 60,
   WIND_DANGER: 80,
+
+  // ─── PM2.5 µg/m³ (WHO / CPCB) ─────────────────────────────
+  PM25_WARNING: 30, // Moderate
+  PM25_SEVERE: 60, // Poor
+  PM25_DANGER: 90, // Very Poor
+
+  // ─── PM10 µg/m³ (WHO / CPCB) ──────────────────────────────
+  PM10_WARNING: 50, // Moderate
+  PM10_SEVERE: 100, // Poor
+  PM10_DANGER: 250, // Very Poor
+
+  // ─── Humidity % ───────────────────────────────────────────
+  HUMIDITY_WARNING: 75, // Uncomfortable
+  HUMIDITY_SEVERE: 85, // Very muggy
+  HUMIDITY_DANGER: 95, // Oppressive
+
+  // ─── Precipitation mm/hr (IMD) ─────────────────────────────
+  PRECIP_WARNING: 2.5, // Light rain
+  PRECIP_SEVERE: 7.5, // Moderate rain
+  PRECIP_DANGER: 35.5, // Heavy rain
 };

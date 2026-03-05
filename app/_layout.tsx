@@ -3,7 +3,7 @@ import * as Notifications from "expo-notifications";
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import {
   Animated,
   Image,
@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import "react-native-reanimated";
+import { RiskContext } from "./(tabs)";
 
 // Keep native splash visible until we're ready to animate!
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -390,12 +391,14 @@ export default function RootLayout() {
     };
   }, [router]);
 
+  const risk = useContext(RiskContext);
+
   return (
     <>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       </Stack>
-      <StatusBar style="light" />
+      <StatusBar backgroundColor={risk?.bg || "#000000"} style="light" />
 
       {/* Animated splash on top until animation finishes */}
       {!splashDone && <AnimatedSplash onFinish={() => setSplashDone(true)} />}

@@ -19,7 +19,6 @@ export const evaluateRisk = (
   const visibility = data?.current?.vis_km;
   const wind = data?.current?.wind_kph;
 
-  // ─── Overall AQI (NAQI) ───────────────────────────────────────────────────
   if (aq) {
     const aqi = calculateOverallAQI(aq);
 
@@ -50,7 +49,7 @@ export const evaluateRisk = (
     }
   }
 
-  // ─── UV Index (IMD / WHO) ─────────────────────────────────────────────────
+  // ─── UV Index (IMD / WHO) ─────────────────────────────────────────────
   if (uv != null) {
     if (uv >= RISK_LIMITS.UV_DANGER) {
       alerts.push({
@@ -73,7 +72,7 @@ export const evaluateRisk = (
     }
   }
 
-  // ─── Temperature (IMD Heatwave) ───────────────────────────────────────────
+  // ─── Temperature (IMD Heatwave) ───────────────────────────────────────
   if (temp != null) {
     if (temp >= RISK_LIMITS.TEMP_DANGER) {
       alerts.push({
@@ -96,7 +95,7 @@ export const evaluateRisk = (
     }
   }
 
-  // ─── Visibility (IMD Fog Classification) ──────────────────────────────────
+  // ─── Visibility (IMD Fog Classification) ──────────────────────────────
   if (visibility != null) {
     if (visibility <= RISK_LIMITS.VISIBILITY_DANGER) {
       alerts.push({
@@ -119,7 +118,7 @@ export const evaluateRisk = (
     }
   }
 
-  // ─── Wind Speed (IMD Wind Severity) ───────────────────────────────────────
+  // ─── Wind Speed (IMD Wind Severity) ───────────────────────────────────
   if (wind != null) {
     if (wind >= RISK_LIMITS.WIND_DANGER) {
       alerts.push({

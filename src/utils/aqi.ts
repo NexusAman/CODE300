@@ -101,7 +101,7 @@ export const getAQIColor = (aqi: number) => {
   if (aqi <= 200) return "#FBBF24"; // Moderate — yellow
   if (aqi <= 300) return "#FB923C"; // Poor — orange
   if (aqi <= 400) return "#F87171"; // Very Poor — red
-  return "#DC2626"; // Severe — dark red
+  return "#E879F9"; // Severe — purple
 };
 
 // ─── NAQI Labels (CPCB categories) ──────────────────────────────────────────

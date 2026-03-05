@@ -23,7 +23,7 @@ import {
   WeatherSearchResult,
 } from "../../src/services/weatherService";
 import {
-  calculateAQI,
+  calculateOverallAQI,
   getAQIColor,
   getAQILabelByValue,
 } from "../../src/utils/aqi";
@@ -51,16 +51,15 @@ const LocationCard = ({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const fetch = async () => {
+    const loadWeather = async () => {
       try {
         const envData = await fetchEnvironmentalData(
           loc.latitude,
           loc.longitude,
         );
         const c = envData?.current;
-        const pm25 = c?.air_quality?.pm2_5;
         setWeather({
-          aqi: pm25 ? calculateAQI(pm25) : 0,
+          aqi: c?.air_quality ? calculateOverallAQI(c.air_quality) : 0,
           temp: c?.temp_c ?? 0,
           feelsLike: c?.feelslike_c ?? c?.temp_c ?? 0,
           condition: c?.condition?.text ?? "",
@@ -74,7 +73,7 @@ const LocationCard = ({
         setLoading(false);
       }
     };
-    fetch();
+    loadWeather();
   }, [loc.latitude, loc.longitude]);
 
   const aqiColor = weather ? getAQIColor(weather.aqi) : "#6B7280";
@@ -379,7 +378,11 @@ export default function SavedLocationsScreen() {
       {searchResults.length > 0 && (
         <View style={s.resultsBox}>
           {searchResults.map((item) => (
-            <SearchResultItem key={`${item.lat},${item.lon}`} item={item} onAdd={handleAdd} />
+            <SearchResultItem
+              key={`${item.lat},${item.lon}`}
+              item={item}
+              onAdd={handleAdd}
+            />
           ))}
         </View>
       )}
