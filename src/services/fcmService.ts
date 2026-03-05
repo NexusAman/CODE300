@@ -224,6 +224,7 @@ export const updateLocationOnServer = async (
   latitude: number,
   longitude: number,
   appOpen: boolean = false,
+  activeAlertTypes: string[] = [],
 ): Promise<void> => {
   if (IS_PLACEHOLDER_URL) return; // silently skip — registerDeviceWithServer already warned
 
@@ -251,6 +252,7 @@ export const updateLocationOnServer = async (
       latitude,
       longitude,
       appOpen,
+      activeAlertTypes,
     });
 
     lastLocationUpdate = { latitude, longitude, appOpen, sentAt: now };

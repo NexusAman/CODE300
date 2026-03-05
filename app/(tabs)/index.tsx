@@ -30,23 +30,9 @@ import {
 } from "../../src/services/locationService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
 import { EnvironmentalData } from "../../src/types/environment";
-import { calculateAQI } from "../../src/utils/aqi";
+import { calculateOverallAQI, getAQILabelByValue } from "../../src/utils/aqi";
 
 // ─── AQI Helpers ─────────────────────────────────────────────────────────────
-
-const getAQILabel = (aqi: number | undefined) => {
-  if (aqi == null) return "Unknown";
-  const labels = [
-    "",
-    "Good",
-    "Moderate",
-    "Unhealthy (Sensitive)",
-    "Unhealthy",
-    "Very Unhealthy",
-    "Hazardous",
-  ];
-  return labels[aqi] ?? "Unknown";
-};
 
 // ─── Risk Config ──────────────────────────────────────────────────────────────
 
@@ -59,6 +45,7 @@ type RiskConfig = {
   advice: string;
 };
 
+// ─── NAQI Risk Tiers (CPCB India) ──────────────────────────────────────────
 const getRiskConfig = (realAQI: number | null): RiskConfig => {
   if (realAQI == null)
     return {
@@ -71,38 +58,56 @@ const getRiskConfig = (realAQI: number | null): RiskConfig => {
     };
   if (realAQI <= 50)
     return {
-      level: "SAFE",
-      color: "#34D399",
-      glow: "#34D39920",
+      level: "GOOD",
+      color: "#22C55E",
+      glow: "#22C55E20",
       icon: "✦",
       bg: "#060f0a",
       advice: "Air quality is ideal. Enjoy outdoor activities.",
     };
   if (realAQI <= 100)
     return {
+      level: "SATISFACTORY",
+      color: "#A3E635",
+      glow: "#A3E63520",
+      icon: "✦",
+      bg: "#080f04",
+      advice: "Minor discomfort possible for very sensitive people.",
+    };
+  if (realAQI <= 200)
+    return {
       level: "MODERATE",
       color: "#FBBF24",
       glow: "#FBBF2420",
       icon: "◈",
       bg: "#0f0c00",
-      advice: "Sensitive groups should limit prolonged exertion.",
+      advice: "May cause discomfort to people with asthma or heart disease.",
     };
-  if (realAQI <= 200)
+  if (realAQI <= 300)
     return {
-      level: "UNHEALTHY",
+      level: "POOR",
+      color: "#FB923C",
+      glow: "#FB923C20",
+      icon: "⚠",
+      bg: "#0f0800",
+      advice: "Discomfort on prolonged exposure. Avoid outdoor exertion.",
+    };
+  if (realAQI <= 400)
+    return {
+      level: "VERY POOR",
       color: "#F87171",
       glow: "#F8717120",
       icon: "⚠",
       bg: "#0f0505",
-      advice: "Limit outdoor activity. Wear a mask if going out.",
+      advice: "May cause respiratory illness. Limit outdoor activity.",
     };
   return {
-    level: "DANGEROUS",
+    level: "SEVERE",
     color: "#E879F9",
     glow: "#E879F920",
     icon: "☣",
     bg: "#0d0010",
-    advice: "Stay indoors. Serious health risk.",
+    advice: "Health emergency. Stay indoors, use air purifier.",
   };
 };
 
@@ -139,7 +144,7 @@ const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
   return (
     <View style={gaugeS.wrapper}>
       <View style={gaugeS.track}>
-        {["#34D399", "#A3E635", "#FBBF24", "#FB923C", "#F87171", "#E879F9"].map(
+        {["#22C55E", "#A3E635", "#FBBF24", "#FB923C", "#F87171", "#E879F9"].map(
           (c, i) => (
             <View key={i} style={[gaugeS.seg, { backgroundColor: c + "28" }]} />
           ),
@@ -477,7 +482,8 @@ export default function HomeScreen() {
               coordsForSync.latitude,
               coordsForSync.longitude,
               true,
-            ).catch(() => { });
+              alertedTypesRef.current,
+            ).catch(() => {});
           }
         } catch (err) {
           setBgLocationDenied((prev) => (prev !== true ? true : prev));
@@ -519,7 +525,12 @@ export default function HomeScreen() {
 
     try {
       await registerDeviceWithServer(latitude, longitude);
-      updateLocationOnServer(latitude, longitude, true);
+      updateLocationOnServer(
+        latitude,
+        longitude,
+        true,
+        alertedTypesRef.current,
+      );
       nextRegistrationAllowedAtRef.current = 0;
     } catch (regErr: unknown) {
       const authMismatch =
@@ -565,14 +576,22 @@ export default function HomeScreen() {
           await AsyncStorage.getItem("lastLocationName");
         const cachedEnvData = await AsyncStorage.getItem("lastEnvData");
         const cachedUpdatedAt = await AsyncStorage.getItem("lastUpdatedAt");
+        const cachedTrend = await AsyncStorage.getItem("lastTrend");
 
         if (cachedCoords) setCoords(JSON.parse(cachedCoords));
         if (cachedLocationName) setLocationName(cachedLocationName);
         if (cachedEnvData) {
-          setData(JSON.parse(cachedEnvData));
+          const parsedEnv = JSON.parse(cachedEnvData);
+          setData(parsedEnv);
           hasCachedDataRef.current = true;
+
+          const aqData = parsedEnv?.current?.air_quality;
+          if (aqData) {
+            previousAQIRef.current = calculateOverallAQI(aqData);
+          }
         }
         if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
+        if (cachedTrend) setTrend(cachedTrend as "up" | "down" | "stable");
       } catch {
         // fail silently — not critical
       }
@@ -581,9 +600,9 @@ export default function HomeScreen() {
     loadPersistedAlerts();
   }, []);
 
-  const epaIndex = data?.current?.air_quality?.["us-epa-index"];
-  const pm25 = data?.current?.air_quality?.pm2_5;
-  const realAQI = pm25 != null ? calculateAQI(pm25) : null;
+  const aqData = data?.current?.air_quality;
+  const pm25 = aqData?.pm2_5;
+  const realAQI = aqData ? calculateOverallAQI(aqData) : null;
   const risk = getRiskConfig(realAQI);
 
   // Animation
@@ -635,8 +654,17 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!alertsLoaded) return;
     const init = async () => {
-      // If we already have cached data, run silently (no spinner)
-      // so the user instantly sees last-known state while it refreshes.
+      // If we have recent cached data (< 5 min old), skip the fetch entirely.
+      // On first install there's no cache, so it always fetches.
+      if (hasCachedDataRef.current && updatedAt) {
+        const ageMs = Date.now() - updatedAt.getTime();
+        if (ageMs < REFRESH_INTERVAL_MS) {
+          // Data is still fresh — don't waste an API call
+          return;
+        }
+      }
+
+      // No cache (first install) or stale data → fetch
       await checkEnvironment(!hasCachedDataRef.current);
     };
     init();
@@ -669,13 +697,23 @@ export default function HomeScreen() {
         checkBackgroundPermission(coords ?? undefined, true);
         // Guard: only update if we have real coordinates — never send 0,0
         if (coords) {
-          updateLocationOnServer(coords.latitude, coords.longitude, true);
+          updateLocationOnServer(
+            coords.latitude,
+            coords.longitude,
+            true,
+            alertedTypesRef.current,
+          );
         }
       } else if (nextState === "background") {
         // App went to background — tell server to resume push
         // Guard: only update if we have real coordinates — never send 0,0
         if (coords) {
-          updateLocationOnServer(coords.latitude, coords.longitude, false);
+          updateLocationOnServer(
+            coords.latitude,
+            coords.longitude,
+            false,
+            alertedTypesRef.current,
+          );
         }
       }
     };
@@ -758,7 +796,7 @@ export default function HomeScreen() {
       AsyncStorage.setItem(
         "alertedTypes",
         JSON.stringify(alertedTypesRef.current),
-      ).catch(() => { });
+      ).catch(() => {});
 
       // 📜 Save only severe/danger to history — warnings show in UI only
       const severeAndAbove = newAlerts.filter(
@@ -773,7 +811,7 @@ export default function HomeScreen() {
           }));
           const updated = [...newItems, ...prev].slice(0, 10);
           AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
-            () => { },
+            () => {},
           );
           return updated;
         });
@@ -788,7 +826,7 @@ export default function HomeScreen() {
     AsyncStorage.setItem(
       "alertedTypes",
       JSON.stringify(alertedTypesRef.current),
-    ).catch(() => { });
+    ).catch(() => {});
   };
 
   const checkEnvironment = async (silent = false) => {
@@ -823,7 +861,12 @@ export default function HomeScreen() {
       // silent = true means app is open (interval or AppState foreground)
       // → pass appOpen: true so server skips push (app handles it locally)
       if (silent) {
-        updateLocationOnServer(userCoords.latitude, userCoords.longitude, true);
+        updateLocationOnServer(
+          userCoords.latitude,
+          userCoords.longitude,
+          true,
+          alertedTypesRef.current,
+        );
       }
 
       setData(envData);
@@ -832,15 +875,15 @@ export default function HomeScreen() {
 
       // Persist last-known state so cold-starts show data immediately
       AsyncStorage.setItem("lastCoords", JSON.stringify(userCoords)).catch(
-        () => { },
+        () => {},
       );
       AsyncStorage.setItem("lastLocationName", resolvedLocationName).catch(
-        () => { },
+        () => {},
       );
       AsyncStorage.setItem("lastEnvData", JSON.stringify(envData)).catch(
-        () => { },
+        () => {},
       );
-      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => { });
+      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => {});
 
       // Keep permission state synchronized even after prior success.
       // Cooldown inside checkBackgroundPermission prevents thrashing.
@@ -849,23 +892,26 @@ export default function HomeScreen() {
       const riskAlerts = evaluateRisk(envData);
       setAlerts(riskAlerts);
 
-      const pm25Value = envData?.current?.air_quality?.pm2_5;
-      const calculatedAQI = pm25Value != null ? calculateAQI(pm25Value) : null;
+      const aqData = envData?.current?.air_quality;
+      const calculatedAQI = aqData ? calculateOverallAQI(aqData) : null;
 
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
+        let newTrend: "up" | "down" | "stable" = "stable";
         if (calculatedAQI > previousAQIRef.current + 5) {
-          setTrend("up");
+          newTrend = "up";
         } else if (calculatedAQI < previousAQIRef.current - 5) {
-          setTrend("down");
-        } else {
-          setTrend("stable");
+          newTrend = "down";
         }
+
+        setTrend(newTrend);
+        AsyncStorage.setItem("lastTrend", newTrend).catch(() => {});
       }
 
       previousAQIRef.current = calculatedAQI;
 
       if (calculatedAQI === null) {
         setTrend(null);
+        AsyncStorage.removeItem("lastTrend").catch(() => {});
       }
 
       lastFetchedAt.current = Date.now();
@@ -1120,21 +1166,26 @@ export default function HomeScreen() {
               <View style={[s.liveDot, { backgroundColor: risk.color }]} />
             </View>
             <MetricRow
-              icon="🌫"
-              label="PM2.5 Particles"
-              value={`${pm25 ?? "–"} µg/m³`}
-              accent={realAQI && realAQI > 100 ? "#F87171" : undefined}
-            />
-            <MetricRow
               icon="📊"
-              label="Real AQI (0–500)"
-              value={realAQI !== null ? String(realAQI) : "–"}
+              label="NAQI"
+              value={
+                realAQI !== null
+                  ? `${realAQI} · ${getAQILabelByValue(realAQI)}`
+                  : "–"
+              }
               accent={risk.color}
             />
             <MetricRow
-              icon="🏛"
-              label="EPA Category"
-              value={epaIndex ? `${epaIndex} · ${getAQILabel(epaIndex)}` : "–"}
+              icon="🌫"
+              label="PM2.5"
+              value={`${pm25 ?? "–"} µg/m³`}
+              accent={pm25 && pm25 > 60 ? "#F87171" : undefined}
+            />
+            <MetricRow
+              icon="🌬"
+              label="PM10"
+              value={`${aqData?.pm10 ?? "–"} µg/m³`}
+              accent={aqData?.pm10 && aqData.pm10 > 100 ? "#F87171" : undefined}
             />
             <MetricRow
               icon="🌡"
@@ -1143,13 +1194,13 @@ export default function HomeScreen() {
             />
             <MetricRow
               icon="💨"
-              label="Wind Speed"
+              label="Wind"
               value={`${data.current.wind_kph ?? "–"} km/h`}
             />
             <MetricRow
               icon="🌧"
               label="Precipitation"
-              value={`${data.current.precip_mm ?? "–"} mm`}
+              value={`${data.current.precip_mm ?? "0"} mm`}
               last
             />
           </View>

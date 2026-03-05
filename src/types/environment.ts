@@ -3,8 +3,13 @@
 // used as the return type for fetchEnvironmentalData.
 
 export interface AirQuality {
-  pm2_5: number;
-  "us-epa-index": number;
+  pm2_5?: number;
+  pm10?: number;
+  co?: number;
+  no2?: number;
+  o3?: number;
+  so2?: number;
+  "us-epa-index"?: number;
 }
 
 export interface CurrentWeather {

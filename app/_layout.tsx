@@ -351,9 +351,37 @@ export default function RootLayout() {
       })
       .catch(() => {});
 
-    // Handle notification taps — bring user to home screen
+    // Handle notification taps — bring user to home screen and save to history
     notifResponseListener.current =
-      Notifications.addNotificationResponseReceivedListener(() => {
+      Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data;
+
+        // If it's a server-sent alert, manually add it to the history list
+        // so it appears in the UI after the app opens.
+        if (data?.source === "server_alert" && data?.message) {
+          AsyncStorage.getItem("alertHistory").then((historyStr) => {
+            try {
+              const history = historyStr ? JSON.parse(historyStr) : [];
+              const newItem = {
+                message: data.message,
+                time: new Date().toLocaleTimeString(),
+                severity: data.severity || "severe",
+              };
+              // Keep last 10
+              const updated = [newItem, ...history].slice(0, 10);
+              AsyncStorage.setItem(
+                "alertHistory",
+                JSON.stringify(updated),
+              ).catch(() => {});
+            } catch (e) {
+              console.warn(
+                "Failed to update alert history from notification:",
+                e,
+              );
+            }
+          });
+        }
+
         router.push("/(tabs)");
       });
 
