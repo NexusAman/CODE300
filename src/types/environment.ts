@@ -16,6 +16,7 @@ export interface CurrentWeather {
   temp_c: number;
   feelslike_c: number;
   uv: number;
+  is_day: 0 | 1; // 1 = daytime, 0 = night — WeatherAPI always returns this
   vis_km: number;
   humidity: number;
   wind_kph: number;

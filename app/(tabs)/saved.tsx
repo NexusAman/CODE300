@@ -63,7 +63,7 @@ const LocationCard = ({
           temp: c?.temp_c ?? 0,
           feelsLike: c?.feelslike_c ?? c?.temp_c ?? 0,
           condition: c?.condition?.text ?? "",
-          uv: c?.uv ?? 0,
+          uv: c?.is_day === 0 ? 0 : (c?.uv ?? 0),
           humidity: c?.humidity ?? 0,
           wind: c?.wind_kph ?? 0,
         });

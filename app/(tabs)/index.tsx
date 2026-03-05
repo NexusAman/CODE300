@@ -3,6 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -18,6 +19,7 @@ import {
   View,
 } from "react-native";
 import Animated, {
+  Easing,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -461,38 +463,39 @@ export default function HomeScreen() {
     trendAnim.value = 0;
     if (trend === "up" || trend === "down") {
       trendAnim.value = withRepeat(
-        withTiming(1, { duration: 2400 }),
+        withTiming(1, { duration: 2800, easing: Easing.inOut(Easing.sin) }),
         -1,
         false,
       );
     } else if (trend === "stable") {
       trendAnim.value = withRepeat(withTiming(1, { duration: 2400 }), -1, true);
     }
-  }, [trend, trendAnim]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trend]);
 
   const trendIconStyle = useAnimatedStyle(() => {
     if (trend === "up") {
       return {
         transform: [
-          { translateY: -2 - trendAnim.value * 6 },
-          { scale: 0.8 + (1 - trendAnim.value) * 0.4 },
+          { translateY: -trendAnim.value * 10 },
+          { scale: 1 - trendAnim.value * 0.15 },
         ],
-        opacity: 1 - trendAnim.value,
+        opacity: Math.pow(1 - trendAnim.value, 1.4),
       };
     }
     if (trend === "down") {
       return {
         transform: [
-          { translateY: -6 + trendAnim.value * 6 },
-          { scale: 0.8 + (1 - trendAnim.value) * 0.4 },
+          { translateY: trendAnim.value * 10 },
+          { scale: 1 - trendAnim.value * 0.15 },
         ],
-        opacity: 1 - trendAnim.value,
+        opacity: Math.pow(1 - trendAnim.value, 1.4),
       };
     }
     if (trend === "stable") {
       return {
-        transform: [{ scale: 0.9 + trendAnim.value * 0.2 }],
-        opacity: 0.6 + trendAnim.value * 0.4,
+        transform: [{ scale: 0.92 + trendAnim.value * 0.16 }],
+        opacity: 0.65 + trendAnim.value * 0.35,
       };
     }
     return {};
@@ -590,7 +593,14 @@ export default function HomeScreen() {
         true,
         alertedTypesRef.current,
       );
-      nextRegistrationAllowedAtRef.current = 0;
+      // Registered successfully — don't re-register for 24 hours.
+      // Server already does an upsert so repeated calls are wasteful.
+      nextRegistrationAllowedAtRef.current = now + 24 * 60 * 60 * 1000;
+      // Persist so the cooldown survives app restarts (ref resets to 0 on every launch)
+      AsyncStorage.setItem(
+        "nextRegistrationAllowedAt",
+        String(nextRegistrationAllowedAtRef.current),
+      ).catch(() => {});
     } catch (regErr: unknown) {
       const authMismatch =
         typeof regErr === "object" &&
@@ -628,6 +638,13 @@ export default function HomeScreen() {
         const storedHistory = await AsyncStorage.getItem("alertHistory");
         if (storedHistory) setAlertHistory(JSON.parse(storedHistory));
 
+        // Restore registration cooldown so it survives app restarts
+        const storedRegAt = await AsyncStorage.getItem(
+          "nextRegistrationAllowedAt",
+        );
+        if (storedRegAt)
+          nextRegistrationAllowedAtRef.current = Number(storedRegAt);
+
         // Restore last known state — renders stale data instantly while
         // the background refresh (triggered below) fetches fresh data.
         const cachedCoords = await AsyncStorage.getItem("lastCoords");
@@ -648,6 +665,11 @@ export default function HomeScreen() {
           if (aqData) {
             previousAQIRef.current = calculateOverallAQI(aqData);
           }
+
+          // Immediately evaluate alerts from cached data so they show on cold-start
+          // without waiting for the next checkEnvironment cycle
+          const cachedAlerts = evaluateRisk(parsedEnv);
+          setAlerts(cachedAlerts);
         }
         if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
         if (cachedTrend) setTrend(cachedTrend as "up" | "down" | "stable");
@@ -891,8 +913,11 @@ export default function HomeScreen() {
     ).catch(() => {});
   };
 
-  const checkEnvironment = async (silent = false) => {
-    if (isCheckingRef.current) return;
+  const checkEnvironment = async (silent = false): Promise<boolean> => {
+    if (isCheckingRef.current) {
+      setRefreshing(false); // prevent spinner hang if a check is already in-flight
+      return false; // skipped — another check was already in-flight
+    }
     isCheckingRef.current = true;
 
     try {
@@ -1005,17 +1030,22 @@ export default function HomeScreen() {
       if (!silent) setLoading(false);
       setRefreshing(false); // Always stop the pull-to-refresh spinner
     }
+    return true; // completed
   };
 
   const onRefresh = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setRefreshing(true);
-    await checkEnvironment(true);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const didRun = await checkEnvironment(true);
+    // Only fire success haptic if refresh actually ran (not skipped by lock)
+    if (didRun) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
   };
 
   return (
-    <RiskContext.Provider value={{ bg: risk.bg, color: risk.color }}>
+    <>
+      <StatusBar backgroundColor={risk.bg} style="light" />
       <ScrollView
         style={[s.root, { backgroundColor: risk.bg }]}
         contentContainerStyle={[
@@ -1029,6 +1059,7 @@ export default function HomeScreen() {
             onRefresh={onRefresh}
             tintColor={risk.color}
             colors={[risk.color || "#10B981"]} // Android support
+            progressViewOffset={insets.top + 8} // push spinner below status bar
           />
         }
       >
@@ -1054,9 +1085,13 @@ export default function HomeScreen() {
           <View style={s.topRight}>
             {coords && (
               <View style={s.coordBadge}>
-                <Text style={s.coordLine}>{coords.latitude.toFixed(3)}° N</Text>
                 <Text style={s.coordLine}>
-                  {coords.longitude.toFixed(3)}° E
+                  {Math.abs(coords.latitude).toFixed(3)}°{" "}
+                  {coords.latitude >= 0 ? "N" : "S"}
+                </Text>
+                <Text style={s.coordLine}>
+                  {Math.abs(coords.longitude).toFixed(3)}°{" "}
+                  {coords.longitude >= 0 ? "E" : "W"}
                 </Text>
               </View>
             )}
@@ -1261,7 +1296,8 @@ export default function HomeScreen() {
                       ? METRIC_COLORS.TEMP.warning
                       : METRIC_COLORS.TEMP.normal;
 
-              const uvVal = data.current.uv ?? 0;
+              const uvVal =
+                data.current.is_day === 0 ? 0 : (data.current.uv ?? 0);
               const uvColor =
                 uvVal >= RISK_LIMITS.UV_DANGER
                   ? METRIC_COLORS.UV.danger
@@ -1305,7 +1341,11 @@ export default function HomeScreen() {
                     <StatChip
                       icon="☀️"
                       label="UV IDX"
-                      value={String(data.current.uv ?? "–")}
+                      value={
+                        data.current.is_day === 0
+                          ? "0"
+                          : String(data.current.uv ?? "–")
+                      }
                       accent={uvColor}
                     />
                   </View>
@@ -1515,8 +1555,10 @@ export default function HomeScreen() {
             {coords && (
               <View style={s.footerMetaItem}>
                 <Text style={s.footerMetaText}>
-                  POS: {coords.latitude.toFixed(4)} N,{" "}
-                  {coords.longitude.toFixed(4)} E
+                  POS: {Math.abs(coords.latitude).toFixed(4)}°
+                  {coords.latitude >= 0 ? " N" : " S"},{" "}
+                  {Math.abs(coords.longitude).toFixed(4)}°
+                  {coords.longitude >= 0 ? " E" : " W"}
                 </Text>
               </View>
             )}
@@ -1538,7 +1580,7 @@ export default function HomeScreen() {
           </Text>
         </View>
       </ScrollView>
-    </RiskContext.Provider>
+    </>
   );
 }
 

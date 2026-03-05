@@ -14,10 +14,12 @@ export const evaluateRisk = (
   const alerts: RiskAlert[] = [];
 
   const aq = data?.current?.air_quality;
-  const uv = data?.current?.uv;
+  const uv = data?.current?.is_day === 0 ? null : data?.current?.uv; // no UV alerts at night
   const temp = data?.current?.temp_c;
   const visibility = data?.current?.vis_km;
   const wind = data?.current?.wind_kph;
+  const precip = data?.current?.precip_mm;
+  const humidity = data?.current?.humidity;
 
   if (aq) {
     const aqi = calculateOverallAQI(aq);
@@ -137,6 +139,52 @@ export const evaluateRisk = (
         type: "Wind_warning",
         severity: "warning",
         message: `💨 Strong winds — ${wind} km/h. Secure loose objects outdoors.`,
+      });
+    }
+  }
+
+  // ─── Humidity % ───────────────────────────────────────────────────────
+  if (humidity != null) {
+    if (humidity >= RISK_LIMITS.HUMIDITY_DANGER) {
+      alerts.push({
+        type: "Humidity_danger",
+        severity: "danger",
+        message: `💧 Oppressive humidity — ${humidity}%. Heat index critical, stay hydrated indoors.`,
+      });
+    } else if (humidity >= RISK_LIMITS.HUMIDITY_SEVERE) {
+      alerts.push({
+        type: "Humidity_severe",
+        severity: "severe",
+        message: `💧 Very muggy — ${humidity}% humidity. Limit physical exertion outdoors.`,
+      });
+    } else if (humidity >= RISK_LIMITS.HUMIDITY_WARNING) {
+      alerts.push({
+        type: "Humidity_warning",
+        severity: "warning",
+        message: `💧 High humidity — ${humidity}%. May feel uncomfortable, stay hydrated.`,
+      });
+    }
+  }
+
+  // ─── Precipitation (IMD) ──────────────────────────────────────────────
+  if (precip != null && precip > 0) {
+    if (precip >= RISK_LIMITS.PRECIP_DANGER) {
+      alerts.push({
+        type: "Precip_danger",
+        severity: "danger",
+        message: `🌧 Heavy rain — ${precip} mm/hr. Flash flood risk, avoid low-lying areas.`,
+      });
+    } else if (precip >= RISK_LIMITS.PRECIP_SEVERE) {
+      alerts.push({
+        type: "Precip_severe",
+        severity: "severe",
+        message: `🌧 Moderate rain — ${precip} mm/hr. Waterlogging possible, drive carefully.`,
+      });
+    } else if (precip >= RISK_LIMITS.PRECIP_WARNING) {
+      alerts.push({
+        type: "Precip_warning",
+        severity: "warning",
+        message: `🌦 Light rain — ${precip} mm/hr. Carry an umbrella.`,
       });
     }
   }

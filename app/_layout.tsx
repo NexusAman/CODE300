@@ -3,7 +3,7 @@ import * as Notifications from "expo-notifications";
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Animated,
   Image,
@@ -13,7 +13,6 @@ import {
   View,
 } from "react-native";
 import "react-native-reanimated";
-import { RiskContext } from "./(tabs)";
 
 // Keep native splash visible until we're ready to animate!
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -340,6 +339,30 @@ export default function RootLayout() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const router = useRouter();
   const notifResponseListener = useRef<any>(null);
+  const notifReceivedListener = useRef<any>(null);
+
+  const saveServerAlertToHistory = (data: any) => {
+    if (!data?.source || data.source !== "server_alert" || !data?.message)
+      return;
+    AsyncStorage.getItem("alertHistory")
+      .then((historyStr) => {
+        try {
+          const history = historyStr ? JSON.parse(historyStr) : [];
+          const newItem = {
+            message: data.message,
+            time: new Date().toLocaleTimeString(),
+            severity: data.severity || "severe",
+          };
+          const updated = [newItem, ...history].slice(0, 10);
+          AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
+            () => {},
+          );
+        } catch (e) {
+          console.warn("Failed to update alert history from notification:", e);
+        }
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
@@ -352,53 +375,37 @@ export default function RootLayout() {
       })
       .catch(() => {});
 
+    // Save server alert to history when notification arrives in foreground
+    // (covers the race where server pushes while app transitions to foreground)
+    notifReceivedListener.current =
+      Notifications.addNotificationReceivedListener((notification) => {
+        const data = notification.request.content.data;
+        saveServerAlertToHistory(data);
+      });
+
     // Handle notification taps — bring user to home screen and save to history
     notifResponseListener.current =
       Notifications.addNotificationResponseReceivedListener((response) => {
         const data = response.notification.request.content.data;
 
-        // If it's a server-sent alert, manually add it to the history list
-        // so it appears in the UI after the app opens.
-        if (data?.source === "server_alert" && data?.message) {
-          AsyncStorage.getItem("alertHistory").then((historyStr) => {
-            try {
-              const history = historyStr ? JSON.parse(historyStr) : [];
-              const newItem = {
-                message: data.message,
-                time: new Date().toLocaleTimeString(),
-                severity: data.severity || "severe",
-              };
-              // Keep last 10
-              const updated = [newItem, ...history].slice(0, 10);
-              AsyncStorage.setItem(
-                "alertHistory",
-                JSON.stringify(updated),
-              ).catch(() => {});
-            } catch (e) {
-              console.warn(
-                "Failed to update alert history from notification:",
-                e,
-              );
-            }
-          });
-        }
+        // Save to history (same logic as received listener, handles cold-tap launch)
+        saveServerAlertToHistory(data);
 
         router.push("/(tabs)");
       });
 
     return () => {
       notifResponseListener.current?.remove();
+      notifReceivedListener.current?.remove();
     };
   }, [router]);
-
-  const risk = useContext(RiskContext);
 
   return (
     <>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       </Stack>
-      <StatusBar backgroundColor={risk?.bg || "#000000"} style="light" />
+      <StatusBar style="light" />
 
       {/* Animated splash on top until animation finishes */}
       {!splashDone && <AnimatedSplash onFinish={() => setSplashDone(true)} />}
