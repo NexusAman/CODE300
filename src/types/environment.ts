@@ -10,6 +10,10 @@ export interface AirQuality {
   o3?: number;
   so2?: number;
   "us-epa-index"?: number;
+  // ─── Server-side Overrides (for background risk checks) ──────────────
+  _cpcbAqi?: number; // Forced AQI from nearest station
+  _emaPM25?: number; // Smoothed 24-hr background average
+  _emaPM10?: number; // Smoothed 24-hr background average
 }
 
 export interface CurrentWeather {

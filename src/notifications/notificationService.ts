@@ -21,7 +21,8 @@ export const sendRiskNotification = async (alerts: RiskAlert[]) => {
           body: alert.message,
           color: alert.severity === "danger" ? "#E879F9" : "#F87171",
         },
-        // TODO: When upgrading to expo-notifications v1+, change to: trigger: { type: "immediate" }
+        // Note: trigger: null is the correct format for expo-notifications@0.32.x (Expo SDK 54).
+        // When upgrading to expo-notifications v1+, change to: trigger: { type: "immediate" }
         trigger: null,
       });
     } catch (e) {

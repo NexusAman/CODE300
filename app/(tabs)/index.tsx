@@ -6,44 +6,59 @@ import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  AppState,
-  AppStateStatus,
-  DeviceEventEmitter,
-  Platform,
-  RefreshControl,
-  Animated as RNAnimated,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    AppState,
+    AppStateStatus,
+    DeviceEventEmitter,
+    Platform,
+    RefreshControl,
+    Animated as RNAnimated,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import Animated, {
-  Easing,
-  useAnimatedStyle,
-  useSharedValue,
-  withRepeat,
-  withTiming,
+    Easing,
+    useAnimatedStyle,
+    useSharedValue,
+    withRepeat,
+    withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { evaluateRisk, RiskAlert } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
 import {
-  getFCMToken,
-  registerDeviceWithServer,
-  updateLocationOnServer,
+    CPCBResult,
+    fetchNearestCPCBStation,
+} from "../../src/services/cpcbService";
+import {
+    getFCMToken,
+    registerDeviceWithServer,
+    updateLocationOnServer,
 } from "../../src/services/fcmService";
 import {
-  getBackgroundLocationPermissionStatus,
-  getUserLocation,
-  isBackgroundLocationRunning,
-  startBackgroundLocation,
+    getBackgroundLocationPermissionStatus,
+    getUserLocation,
+    isBackgroundLocationRunning,
+    startBackgroundLocation,
 } from "../../src/services/locationService";
+import {
+    clearPMReadings,
+    getRollingAverage,
+    injectServerEMA,
+    recordPMReading,
+    RollingAverage,
+} from "../../src/services/rollingAverageService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
 import { EnvironmentalData } from "../../src/types/environment";
-import { calculateOverallAQI, getAQILabelByValue } from "../../src/utils/aqi";
+import {
+    calculateOverallAQI,
+    calculateOverallAQIFromAvg,
+    getAQILabelByValue,
+} from "../../src/utils/aqi";
 import { METRIC_COLORS } from "../../src/utils/metricColors";
 import { RISK_LIMITS } from "../../src/utils/riskThresholds";
 
@@ -425,6 +440,8 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
   const hasCachedDataRef = useRef(false); // tracks if cached data was restored
+  const [rollingAvg, setRollingAvg] = useState<RollingAverage | null>(null);
+  const [cpcbData, setCpcbData] = useState<CPCBResult | null>(null);
 
   // 🔕 null = not yet checked, false = ok, true = denied
   // Starting as null prevents the banner from flashing on first render
@@ -450,7 +467,7 @@ export default function HomeScreen() {
     latitude: number;
     longitude: number;
   } | null>(null);
-  const LOCATION_CHANGE_THRESHOLD = 0.01; // ~1.1 km — clear stale alerts on meaningful moves
+  const LOCATION_CHANGE_THRESHOLD = 0.1; // ~11 km — clear stale averages when moving between cities/regions
 
   //  Relative time — updates every 30s automatically
   const [relativeTime, setRelativeTime] = useState<string | null>(null);
@@ -577,6 +594,16 @@ export default function HomeScreen() {
       return;
     }
 
+    try {
+      const avg = await getRollingAverage();
+      await registerDeviceWithServer(latitude, longitude, {
+        avgPM25: avg?.pm25Avg,
+        avgPM10: avg?.pm10Avg,
+      });
+    } catch (e) {
+      console.error("Failed to register device with server:", e);
+    }
+
     let token = await getFCMToken();
     if (!token) {
       token = await getFCMToken({ forceRefresh: true });
@@ -681,6 +708,10 @@ export default function HomeScreen() {
         }
         if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
         if (cachedTrend) setTrend(cachedTrend as "up" | "down" | "stable");
+
+        // Restore rolling average so cold-start AQI uses averaged values
+        const avg = await getRollingAverage();
+        if (avg) setRollingAvg(avg);
       } catch {
         // fail silently — not critical
       }
@@ -709,7 +740,45 @@ export default function HomeScreen() {
 
   const aqData = data?.current?.air_quality;
   const pm25 = aqData?.pm2_5;
-  const realAQI = aqData ? calculateOverallAQI(aqData) : null;
+
+  // ─── 3-Tier AQI Fallback ──────────────────────────────────────────────
+  // 1️⃣ CPCB station AQI (official 24-hr averaged, ground-truth)
+  // 2️⃣ WeatherAPI PM → blended rolling average
+  // 3️⃣ Cached data (already held in `data` state from AsyncStorage)
+  const instantAQI = aqData ? calculateOverallAQI(aqData) : null;
+  const aqiSource: "cpcb" | "weatherapi" | "cached" | null = (() => {
+    if (cpcbData?.isFresh && cpcbData.station.aqi != null) return "cpcb";
+    if (instantAQI !== null) return "weatherapi";
+    if (data != null) return "cached";
+    return null;
+  })();
+
+  const realAQI = (() => {
+    // 1️⃣ CPCB official AQI — already 24-hr averaged by the station
+    if (aqiSource === "cpcb") return cpcbData!.station.aqi!;
+
+    // 2️⃣ WeatherAPI with rolling average blend
+    if (instantAQI === null) return null;
+
+    // TRAVEL MODE: If moving fast (> 0.05 deg since last check), prioritize instant reading.
+    // 0.05 deg = ~5.5km. In 5 mins = 66km/h. In 10 mins = 33km/h.
+    const isMovingFast =
+      prevCoordsRef.current &&
+      coords &&
+      (Math.abs(coords.latitude - prevCoordsRef.current.latitude) > 0.05 ||
+        Math.abs(coords.longitude - prevCoordsRef.current.longitude) > 0.05);
+
+    if (isMovingFast) return instantAQI;
+
+    if (rollingAvg == null || rollingAvg.sampleCount < 2) return instantAQI;
+
+    const avgAQI = calculateOverallAQIFromAvg(
+      rollingAvg.pm25Avg,
+      rollingAvg.pm10Avg,
+    );
+    const weight = Math.min(rollingAvg.spanHours / 24, 1);
+    return Math.round(weight * avgAQI + (1 - weight) * instantAQI);
+  })();
   const risk = getRiskConfig(realAQI);
 
   // Animation
@@ -987,14 +1056,41 @@ export default function HomeScreen() {
         ) {
           alertedTypesRef.current = [];
           AsyncStorage.setItem("alertedTypes", "[]").catch(() => {});
+          // Clear PM history — old location's readings would skew the average
+          clearPMReadings().catch(() => {});
         }
       }
-      prevCoordsRef.current = userCoords;
 
-      const envData = await fetchEnvironmentalData(
-        userCoords.latitude,
-        userCoords.longitude,
-      );
+      // ─── 3-Tier Data Fetch ─────────────────────────────────────────────
+      // 1️⃣ Try CPCB + WeatherAPI in parallel
+      // 2️⃣ If WeatherAPI fails but CPCB works → use cached weather + CPCB AQI
+      // 3️⃣ If both fail → keep existing cached data (set in useEffect on mount)
+
+      let envData: EnvironmentalData | null = null;
+      let cpcbResult: CPCBResult | null = null;
+
+      const [weatherResult, cpcbSettled] = await Promise.allSettled([
+        fetchEnvironmentalData(userCoords.latitude, userCoords.longitude),
+        fetchNearestCPCBStation(userCoords.latitude, userCoords.longitude),
+      ]);
+
+      cpcbResult =
+        cpcbSettled.status === "fulfilled" ? cpcbSettled.value : null;
+      setCpcbData(cpcbResult);
+
+      if (weatherResult.status === "fulfilled") {
+        envData = weatherResult.value;
+      } else if (data) {
+        // WeatherAPI failed → keep showing cached data
+        envData = data;
+        console.warn(
+          "WeatherAPI failed, using cached data:",
+          weatherResult.reason,
+        );
+      } else {
+        // Both APIs failed and no cache — rethrow to trigger error UI
+        throw weatherResult.reason;
+      }
 
       // ✅ Always resolve location safely
       const resolvedLocationName = await reverseGeocode(
@@ -1009,18 +1105,39 @@ export default function HomeScreen() {
         !silent,
       );
 
+      setData(envData);
+      const now = new Date();
+      setUpdatedAt(now);
+
+      // Record PM values for rolling 24-hr average
+      const aqFresh = envData?.current?.air_quality;
+      if (aqFresh?.pm2_5 != null && aqFresh?.pm10 != null) {
+        await recordPMReading(aqFresh.pm2_5, aqFresh.pm10);
+      }
+      const avg = await getRollingAverage();
+      setRollingAvg(avg);
+
       // FIX: Always tell server app is open when checking from foreground,
-      // not just when silent — ensures server skips push even on initial load
+      // not just when silent — ensures server skips push even on initial load.
+      // Now also sends rolling average and receives server EMA for Hybrid Sync.
       updateLocationOnServer(
         userCoords.latitude,
         userCoords.longitude,
         true,
         alertedTypesRef.current,
-      );
-
-      setData(envData);
-      const now = new Date();
-      setUpdatedAt(now);
+        avg?.pm25Avg,
+        avg?.pm10Avg,
+      )
+        .then(async (serverEma) => {
+          if (serverEma?.emaPM25 != null && serverEma?.emaPM10 != null) {
+            // Inject server's background average into local history
+            await injectServerEMA(serverEma.emaPM25, serverEma.emaPM10);
+            // Refresh local average calculation
+            const updatedAvg = await getRollingAverage();
+            setRollingAvg(updatedAvg);
+          }
+        })
+        .catch(() => {});
 
       // Persist last-known state so cold-starts show data immediately
       AsyncStorage.setItem("lastCoords", JSON.stringify(userCoords)).catch(
@@ -1066,6 +1183,10 @@ export default function HomeScreen() {
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
+
+      // Update tracking after everything is done — ensures Travel Mode
+      // is correctly detected during this render cycle.
+      prevCoordsRef.current = userCoords;
     } catch (err: unknown) {
       // Even if weather fails, show coordinates instead of infinite loading
       if (!locationName && coords) {
@@ -1344,6 +1465,60 @@ export default function HomeScreen() {
                   {realAQI ?? "–"} / 500
                 </Text>
               </View>
+              {aqiSource === "cpcb" && cpcbData && (
+                <Text
+                  style={{ fontSize: 10, color: "#34D399", marginBottom: 2 }}
+                >
+                  ✓ CPCB Official · {cpcbData.station.stationName} (
+                  {cpcbData.station.distanceKm} km)
+                </Text>
+              )}
+              {aqiSource === "weatherapi" && (
+                <>
+                  {rollingAvg && rollingAvg.sampleCount > 1 && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#6B7280",
+                        marginBottom: 2,
+                      }}
+                    >
+                      {rollingAvg.spanHours >= 24
+                        ? `24-hr avg · ${rollingAvg.sampleCount} samples`
+                        : `${Math.round(Math.min((rollingAvg.spanHours / 24) * 100, 100))}% of 24-hr avg · ${rollingAvg.sampleCount} samples · ${rollingAvg.spanHours}h`}
+                    </Text>
+                  )}
+                  {cpcbData && !cpcbData.isFresh && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#FBBF24",
+                        marginBottom: 2,
+                      }}
+                    >
+                      CPCB offline · using WeatherAPI estimate
+                    </Text>
+                  )}
+                  {!cpcbData && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#6B7280",
+                        marginBottom: 2,
+                      }}
+                    >
+                      No CPCB station nearby · WeatherAPI estimate
+                    </Text>
+                  )}
+                </>
+              )}
+              {aqiSource === "cached" && (
+                <Text
+                  style={{ fontSize: 10, color: "#F87171", marginBottom: 2 }}
+                >
+                  ⚠ Offline · showing last known AQI
+                </Text>
+              )}
               <AQIGauge aqi={realAQI} color={risk.color} />
             </View>
 

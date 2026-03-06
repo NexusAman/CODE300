@@ -142,7 +142,7 @@ export const startBackgroundLocation = async (): Promise<void> => {
     // Update every 5 min or if moved 500m — matches server cron interval
     timeInterval: 5 * 60 * 1000,
     distanceInterval: 500,
-    showsBackgroundLocationIndicator: false,
+    showsBackgroundLocationIndicator: true,
     foregroundService: {
       notificationTitle: "Enviro Monitor",
       notificationBody: "Monitoring environmental conditions…",

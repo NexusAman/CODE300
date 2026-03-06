@@ -6,14 +6,27 @@ import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 
 // Your Render.com server URL.
-// EXPO_PUBLIC_SERVER_URL in your .env / EAS secrets takes priority.
-// Falls back to the real production URL so the app works even without the env var set.
-const SERVER_URL =
-  process.env.EXPO_PUBLIC_SERVER_URL || "https://enviro-server.onrender.com";
+// EXPO_PUBLIC_SERVER_URL must be set in your .env / EAS secrets.
+const SERVER_URL = process.env.EXPO_PUBLIC_SERVER_URL;
+if (!SERVER_URL) {
+  console.error(
+    "EXPO_PUBLIC_SERVER_URL is not set. Server features will be disabled.",
+  );
+}
+if (SERVER_URL && !SERVER_URL.startsWith("https://")) {
+  throw new Error("EXPO_PUBLIC_SERVER_URL must use HTTPS.");
+}
+
 const CLIENT_API_KEY = process.env.EXPO_PUBLIC_CLIENT_API_KEY;
+if (!CLIENT_API_KEY) {
+  console.error(
+    "EXPO_PUBLIC_CLIENT_API_KEY is not set. Server requests will be unauthenticated.",
+  );
+}
 
 // Only block if still the original placeholder — never block the real server URL.
-const IS_PLACEHOLDER_URL = SERVER_URL === "https://your-app.onrender.com";
+const IS_PLACEHOLDER_URL =
+  !SERVER_URL || SERVER_URL === "https://your-app.onrender.com";
 const SERVER_TIMEOUT_MS = 10000;
 const SERVER_RETRY_COUNT = 2;
 
@@ -22,7 +35,12 @@ const serverApi = axios.create({
 });
 
 const getClientAuthHeaders = () => {
-  if (!CLIENT_API_KEY) return undefined;
+  if (!CLIENT_API_KEY) {
+    console.warn(
+      "⚠️ No CLIENT_API_KEY — server request will be unauthenticated.",
+    );
+    return undefined;
+  }
   return { "x-client-key": CLIENT_API_KEY };
 };
 
@@ -44,6 +62,7 @@ const generateUUID = (): string => {
     } else if (i === 14) {
       uuid += "4";
     } else if (i === 19) {
+      // RFC 4122 variant 1: bits 10xx → value in [8, b]
       uuid += hex[(Math.random() * 4) | 8];
     } else {
       uuid += hex[(Math.random() * 16) | 0];
@@ -233,6 +252,7 @@ export const getFCMToken = async (options?: {
 export const registerDeviceWithServer = async (
   latitude: number,
   longitude: number,
+  options?: { avgPM25?: number; avgPM10?: number },
 ): Promise<void> => {
   if (IS_PLACEHOLDER_URL) {
     throw new Error(
@@ -262,6 +282,8 @@ export const registerDeviceWithServer = async (
       previousToken,
       latitude,
       longitude,
+      avgPM25: options?.avgPM25,
+      avgPM10: options?.avgPM10,
     });
 
     // Persist the current token so we can detect future rotations
@@ -282,8 +304,10 @@ export const updateLocationOnServer = async (
   longitude: number,
   appOpen: boolean = false,
   activeAlertTypes: string[] = [],
-): Promise<void> => {
-  if (IS_PLACEHOLDER_URL) return; // silently skip — registerDeviceWithServer already warned
+  avgPM25?: number,
+  avgPM10?: number,
+): Promise<{ emaPM25?: number; emaPM10?: number } | null> => {
+  if (IS_PLACEHOLDER_URL) return null; // silently skip — registerDeviceWithServer already warned
 
   const now = Date.now();
   if (lastLocationUpdate) {
@@ -296,28 +320,32 @@ export const updateLocationOnServer = async (
       now - lastLocationUpdate.sentAt < LOCATION_UPDATE_MIN_INTERVAL_MS;
 
     if (sameAppState && sameLocation && tooSoon) {
-      return;
+      return null;
     }
   }
 
   try {
     const token = await getFCMToken();
-    if (!token) return;
+    if (!token) return null;
 
     const deviceId = await getDeviceId();
 
-    await postWithRetry(`${SERVER_URL}/update-location`, {
+    const response = await postWithRetry(`${SERVER_URL}/update-location`, {
       fcmToken: token,
       deviceId,
       latitude,
       longitude,
       appOpen,
       activeAlertTypes,
+      avgPM25,
+      avgPM10,
     });
 
     lastLocationUpdate = { latitude, longitude, appOpen, sentAt: now };
+    return response.data?.ema || null;
   } catch (err) {
     // Fail silently — not critical
     console.warn("Failed to update location on server:", err);
+    return null;
   }
 };

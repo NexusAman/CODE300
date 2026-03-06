@@ -83,12 +83,31 @@ export const calculateSO2AQI = (so2: number): number => {
 // 8-hour/24-hour averages for gases. Using real-time gas spikes causes
 // massive artificial inflation of AQI compared to official monitors.
 export const calculateOverallAQI = (aq: AirQuality): number => {
+  // 1️⃣ Server-side CPCB Override (Highest Priority)
+  if (aq._cpcbAqi != null) return aq._cpcbAqi;
+
   const subIndices: number[] = [];
 
-  if (aq.pm2_5 != null) subIndices.push(calculatePM25AQI(aq.pm2_5));
-  if (aq.pm10 != null) subIndices.push(calculatePM10AQI(aq.pm10));
+  // 2️⃣ Server-side EMA Override (Smoothed 24-hr average)
+  if (aq._emaPM25 != null || aq._emaPM10 != null) {
+    if (aq._emaPM25 != null) subIndices.push(calculatePM25AQI(aq._emaPM25));
+    if (aq._emaPM10 != null) subIndices.push(calculatePM10AQI(aq._emaPM10));
+  } else {
+    // 3️⃣ Real-time WeatherAPI values
+    if (aq.pm2_5 != null) subIndices.push(calculatePM25AQI(aq.pm2_5));
+    if (aq.pm10 != null) subIndices.push(calculatePM10AQI(aq.pm10));
+  }
 
   return subIndices.length > 0 ? Math.max(...subIndices) : 0;
+};
+
+// ─── AQI from 24-hour rolling averages (CPCB-accurate) ─────────────────────
+// Use this when a rolling average is available for more accurate results.
+export const calculateOverallAQIFromAvg = (
+  pm25Avg: number,
+  pm10Avg: number,
+): number => {
+  return Math.max(calculatePM25AQI(pm25Avg), calculatePM10AQI(pm10Avg));
 };
 
 // Backward compat alias
