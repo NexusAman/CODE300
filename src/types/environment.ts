@@ -36,7 +36,27 @@ export interface WeatherLocation {
   region?: string;
 }
 
+export interface ForecastHour {
+  time_epoch: number;
+  time: string;
+  temp_c: number;
+  precip_mm: number;
+  condition: {
+    text: string;
+    icon: string;
+  };
+  air_quality: AirQuality;
+}
+
+export interface WeatherForecast {
+  forecastday: {
+    date: string;
+    hour: ForecastHour[];
+  }[];
+}
+
 export interface EnvironmentalData {
   current: CurrentWeather;
   location?: WeatherLocation;
+  forecast?: WeatherForecast;
 }

@@ -6,61 +6,504 @@ import { useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    AppState,
-    AppStateStatus,
-    DeviceEventEmitter,
-    Platform,
-    RefreshControl,
-    Animated as RNAnimated,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  AppState,
+  AppStateStatus,
+  DeviceEventEmitter,
+  Dimensions,
+  Platform,
+  RefreshControl,
+  Animated as RNAnimated,
+  Image as RNImage,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import Animated, {
-    Easing,
-    useAnimatedStyle,
-    useSharedValue,
-    withRepeat,
-    withTiming,
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import Svg, { Defs, LinearGradient, Path, Stop } from "react-native-svg";
 import { evaluateRisk, RiskAlert } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
 import {
-    CPCBResult,
-    fetchNearestCPCBStation,
+  CPCBResult,
+  fetchNearestCPCBStation,
 } from "../../src/services/cpcbService";
 import {
-    getFCMToken,
-    registerDeviceWithServer,
-    updateLocationOnServer,
+  getFCMToken,
+  registerDeviceWithServer,
+  updateLocationOnServer,
 } from "../../src/services/fcmService";
 import {
-    getBackgroundLocationPermissionStatus,
-    getUserLocation,
-    isBackgroundLocationRunning,
-    startBackgroundLocation,
+  getBackgroundLocationPermissionStatus,
+  getUserLocation,
+  isBackgroundLocationRunning,
+  startBackgroundLocation,
 } from "../../src/services/locationService";
 import {
-    clearPMReadings,
-    getRollingAverage,
-    injectServerEMA,
-    recordPMReading,
-    RollingAverage,
+  clearPMReadings,
+  getHourlyHistory,
+  getRollingAverage,
+  HistoryPoint,
+  injectServerEMA,
+  recordPMReading,
+  RollingAverage,
 } from "../../src/services/rollingAverageService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
-import { EnvironmentalData } from "../../src/types/environment";
+import { EnvironmentalData, ForecastHour } from "../../src/types/environment";
 import {
-    calculateOverallAQI,
-    calculateOverallAQIFromAvg,
-    getAQILabelByValue,
+  calculateOverallAQI,
+  calculateOverallAQIFromAvg,
+  getAQIColor,
+  getAQILabelByValue,
 } from "../../src/utils/aqi";
 import { METRIC_COLORS } from "../../src/utils/metricColors";
 import { RISK_LIMITS } from "../../src/utils/riskThresholds";
+
+// ─── Trend Chart (V2) ────────────────────────────────────────────────────────
+
+const TrendChart = ({
+  data,
+  color,
+}: {
+  data: HistoryPoint[];
+  color: string;
+}) => {
+  const [chartWidth, setChartWidth] = useState(0);
+  if (!data || data.length < 2) return null;
+
+  const height = 40;
+  const maxVal = Math.max(...data.map((p) => p.aqi), 50);
+
+  // Cubic Bézier smoothing logic
+  let d = "";
+  if (chartWidth > 0) {
+    const points = data.map((p, i) => ({
+      x: (i / (data.length - 1)) * chartWidth,
+      y: height - (p.aqi / maxVal) * height,
+    }));
+
+    d = `M ${points[0].x},${points[0].y}`;
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[i];
+      const p1 = points[i + 1];
+      const cp1x = p0.x + (p1.x - p0.x) / 2;
+      const cp2x = p0.x + (p1.x - p0.x) / 2;
+      d += ` C ${cp1x},${p0.y} ${cp2x},${p1.y} ${p1.x},${p1.y}`;
+    }
+  }
+
+  return (
+    <View
+      style={[tsS.container, { borderLeftColor: color }]}
+      onLayout={(e) => setChartWidth(e.nativeEvent.layout.width - 36)}
+    >
+      <View style={tsS.header}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Ionicons name="stats-chart" size={10} color={color} />
+          <Text style={tsS.title}>24H TREND</Text>
+        </View>
+        <Text style={tsS.timeRange}>24H AGO — NOW</Text>
+      </View>
+      {chartWidth > 0 && (
+        <Svg width={chartWidth} height={height} style={tsS.svg}>
+          <Defs>
+            <LinearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={color} stopOpacity="0.25" />
+              <Stop offset="1" stopColor={color} stopOpacity="0" />
+            </LinearGradient>
+          </Defs>
+          <Path
+            d={`${d} L ${chartWidth},${height} L 0,${height} Z`}
+            fill="url(#trendGrad)"
+          />
+          <Path
+            d={d}
+            fill="none"
+            stroke={color}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+        </Svg>
+      )}
+    </View>
+  );
+};
+
+const tsS = StyleSheet.create({
+  container: {
+    marginTop: 24,
+    width: "100%",
+    padding: 18,
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderLeftWidth: 3,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  title: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#9CA3AF",
+    letterSpacing: 3,
+  },
+  timeRange: {
+    fontSize: 9,
+    fontWeight: "600",
+    color: "#4B5563",
+  },
+  svg: { overflow: "visible" },
+});
+
+const fsS = StyleSheet.create({
+  container: {
+    marginTop: 24,
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderLeftWidth: 3, // Premium Sync
+    borderColor: "rgba(255,255,255,0.06)",
+    paddingVertical: 18,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 20,
+    paddingHorizontal: 18,
+  },
+  title: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#9CA3AF",
+    letterSpacing: 2.5,
+  },
+  selector: {
+    flexDirection: "row",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 14,
+    padding: 2,
+    gap: 2,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
+  },
+  selBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    minWidth: 32,
+    alignItems: "center",
+  },
+  selBtnActive: {
+    backgroundColor: "rgba(255,255,255,0.12)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  selText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#4B5563",
+    letterSpacing: 0.5,
+  },
+  selTextActive: {
+    color: "#F3F4F6",
+  },
+  podWrapper: {
+    borderLeftWidth: 3,
+    borderRadius: 22,
+    overflow: "hidden",
+    height: 114, // Increased height for better presence
+  },
+  podInner: {
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 4,
+    justifyContent: "space-between",
+  },
+  time: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: "#9CA3AF",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  iconPlaceholder: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  weatherIcon: {
+    width: 36,
+    height: 36,
+  },
+  aqi: { fontSize: 17, fontWeight: "800", letterSpacing: 0.2 },
+  unit: { fontSize: 10, fontWeight: "700", marginLeft: 1 },
+});
+
+// ─── Forecast Strip (V2) ─────────────────────────────────────────────────────
+
+const ForecastStrip: React.FC<{
+  hours?: ForecastHour[];
+  mode: "aqi" | "temp" | "precip";
+  onModeChange: (m: "aqi" | "temp" | "precip") => void;
+  activeRiskColor: string;
+}> = ({ hours, mode, onModeChange, activeRiskColor }) => {
+  if (!hours || hours.length === 0) return null;
+
+  const nextHours = hours
+    .filter((h) => h.time_epoch * 1000 > Date.now())
+    .slice(0, 12);
+
+  // 🌈 DYNAMIC MODE-BASED THEME COLOR
+  const firstHour = nextHours[0];
+  let modeThemeColor = activeRiskColor;
+
+  if (firstHour) {
+    if (mode === "temp") {
+      modeThemeColor =
+        firstHour.temp_c >= RISK_LIMITS.TEMP_DANGER
+          ? METRIC_COLORS.TEMP.danger
+          : firstHour.temp_c >= RISK_LIMITS.TEMP_SEVERE
+            ? METRIC_COLORS.TEMP.severe
+            : firstHour.temp_c >= RISK_LIMITS.TEMP_WARNING
+              ? METRIC_COLORS.TEMP.warning
+              : METRIC_COLORS.TEMP.normal;
+    } else if (mode === "precip") {
+      modeThemeColor =
+        firstHour.precip_mm >= RISK_LIMITS.PRECIP_DANGER
+          ? METRIC_COLORS.PRECIPITATION.danger
+          : firstHour.precip_mm >= RISK_LIMITS.PRECIP_SEVERE
+            ? METRIC_COLORS.PRECIPITATION.severe
+            : firstHour.precip_mm >= RISK_LIMITS.PRECIP_WARNING
+              ? METRIC_COLORS.PRECIPITATION.warning
+              : METRIC_COLORS.PRECIPITATION.normal;
+    }
+  }
+
+  return (
+    <View style={[fsS.container, { borderLeftColor: modeThemeColor }]}>
+      <View style={fsS.header}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Ionicons
+            name="time-outline"
+            size={13}
+            color={modeThemeColor + "CC"}
+          />
+          <Text style={[fsS.title, { color: modeThemeColor + "CC" }]}>
+            FUTURE OUTLOOK
+          </Text>
+        </View>
+
+        {/* 🔘 MODE SELECTOR CAPSULE */}
+        <View style={fsS.selector}>
+          {(["aqi", "temp", "precip"] as const).map((m) => {
+            const active = mode === m;
+            return (
+              <TouchableOpacity
+                key={m}
+                onPress={() => {
+                  onModeChange(m);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                    () => {},
+                  );
+                }}
+                style={[fsS.selBtn, active && fsS.selBtnActive]}
+              >
+                <Ionicons
+                  name={
+                    m === "aqi"
+                      ? "cloud-outline"
+                      : m === "temp"
+                        ? "thermometer-outline"
+                        : "rainy-outline"
+                  }
+                  size={15}
+                  color={active ? modeThemeColor : modeThemeColor + "40"}
+                />
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {(() => {
+        // Recalibrate for 4.5-item visible grid (Compact Refinement)
+        const screenWidth = Dimensions.get("window").width;
+        const rootPadding = 40; // root padding (20*2)
+        const scrollHorizontalPadding = 32; // 16 * 2 (internal scroll padding)
+        const totalAvailable =
+          screenWidth - rootPadding - scrollHorizontalPadding;
+        const visibleGaps = 2.8 * 7; // roughly 4 gaps visible in a 4.5 grid
+        const itemWidth = (totalAvailable - visibleGaps) / 4;
+
+        return (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{
+              paddingLeft: 16,
+              paddingRight: 16,
+              paddingBottom: 4,
+            }}
+            snapToInterval={itemWidth + 8} // Precisely snap to items
+            decelerationRate="fast"
+          >
+            {nextHours.map((h, i) => {
+              const aqiValue = calculateOverallAQI(h.air_quality);
+              const aqiColor = getAQIColor(aqiValue);
+              const timeLabel = new Date(
+                h.time_epoch * 1000,
+              ).toLocaleTimeString([], { hour: "numeric", hour12: true });
+
+              let displayVal = String(aqiValue);
+              let unit = "";
+              let activeColor = aqiColor;
+
+              if (mode === "temp") {
+                displayVal = `${Math.round(h.temp_c)}°`;
+                unit = "C";
+                activeColor =
+                  h.temp_c >= RISK_LIMITS.TEMP_DANGER
+                    ? METRIC_COLORS.TEMP.danger
+                    : h.temp_c >= RISK_LIMITS.TEMP_SEVERE
+                      ? METRIC_COLORS.TEMP.severe
+                      : h.temp_c >= RISK_LIMITS.TEMP_WARNING
+                        ? METRIC_COLORS.TEMP.warning
+                        : METRIC_COLORS.TEMP.normal;
+              } else if (mode === "precip") {
+                displayVal = h.precip_mm.toFixed(1);
+                unit = "mm";
+                activeColor =
+                  h.precip_mm >= RISK_LIMITS.PRECIP_DANGER
+                    ? METRIC_COLORS.PRECIPITATION.danger
+                    : h.precip_mm >= RISK_LIMITS.PRECIP_SEVERE
+                      ? METRIC_COLORS.PRECIPITATION.severe
+                      : h.precip_mm >= RISK_LIMITS.PRECIP_WARNING
+                        ? METRIC_COLORS.PRECIPITATION.warning
+                        : METRIC_COLORS.PRECIPITATION.normal;
+              }
+
+              const iconUrl = h.condition.icon
+                ? `https:${h.condition.icon}`
+                : null;
+
+              return (
+                <View
+                  key={i}
+                  style={[
+                    fsS.podWrapper,
+                    {
+                      borderLeftColor: activeColor,
+                      width: itemWidth,
+                      marginRight: i === nextHours.length - 1 ? 0 : 8,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      fsS.podInner,
+                      { backgroundColor: activeColor + "15" },
+                    ]}
+                  >
+                    <View style={fsS.iconPlaceholder}>
+                      {iconUrl ? (
+                        <RNImage
+                          source={{ uri: iconUrl }}
+                          style={fsS.weatherIcon}
+                        />
+                      ) : (
+                        <Ionicons
+                          name="cloud-outline"
+                          size={24}
+                          color={activeColor}
+                        />
+                      )}
+                    </View>
+
+                    <Text style={[fsS.aqi, { color: activeColor }]}>
+                      {displayVal}
+                      {unit && <Text style={fsS.unit}>{unit}</Text>}
+                    </Text>
+
+                    <Text style={fsS.time}>{timeLabel}</Text>
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+        );
+      })()}
+    </View>
+  );
+};
+
+// ─── Animated Switch (V2) ───────────────────────────────────────────────────
+
+const AnimatedSwitch = ({ active }: { active: boolean }) => {
+  const translateX = useSharedValue(active ? 18 : 0);
+
+  useEffect(() => {
+    translateX.value = withTiming(active ? 18 : 0, {
+      duration: 250,
+      easing: Easing.out(Easing.back(1.5)),
+    });
+  }, [active, translateX]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+  }));
+
+  return (
+    <View
+      style={{
+        width: 42,
+        height: 24,
+        borderRadius: 12,
+        backgroundColor: active ? "#EF4444" : "rgba(255,255,255,0.1)",
+        justifyContent: "center",
+        paddingHorizontal: 3,
+        borderWidth: 1,
+        borderColor: active ? "#F87171" : "rgba(255,255,255,0.05)",
+      }}
+    >
+      <Animated.View
+        style={[
+          {
+            width: 18,
+            height: 18,
+            borderRadius: 9,
+            backgroundColor: "white",
+          },
+          animatedStyle,
+        ]}
+      />
+    </View>
+  );
+};
 
 // ─── AQI Helpers ─────────────────────────────────────────────────────────────
 
@@ -442,6 +885,7 @@ export default function HomeScreen() {
   const hasCachedDataRef = useRef(false); // tracks if cached data was restored
   const [rollingAvg, setRollingAvg] = useState<RollingAverage | null>(null);
   const [cpcbData, setCpcbData] = useState<CPCBResult | null>(null);
+  const [hourlyHistory, setHourlyHistory] = useState<HistoryPoint[]>([]);
 
   // 🔕 null = not yet checked, false = ok, true = denied
   // Starting as null prevents the banner from flashing on first render
@@ -449,6 +893,39 @@ export default function HomeScreen() {
   const [bgLocationDenied, setBgLocationDenied] = useState<boolean | null>(
     null,
   );
+  const [isSensitive, setIsSensitive] = useState(false);
+  // FIX: Ref mirror — avoids stale closure in setInterval-based checkEnvironment
+  const isSensitiveRef = useRef(false);
+  // FIX: Ref mirror — avoids AppState/heartbeat listener rebinding on every GPS tick
+  const coordsRef = useRef<{ latitude: number; longitude: number } | null>(
+    null,
+  );
+  const [forecastMode, setForecastMode] = useState<"aqi" | "temp" | "precip">(
+    "aqi",
+  );
+
+  // Load personalization on start
+  useEffect(() => {
+    AsyncStorage.getItem("isSensitive").then((v) => {
+      if (v === "true") {
+        setIsSensitive(true);
+        isSensitiveRef.current = true;
+      }
+    });
+  }, []);
+
+  const toggleSensitive = async () => {
+    const newVal = !isSensitive;
+    setIsSensitive(newVal);
+    isSensitiveRef.current = newVal; // keep ref in sync
+    await AsyncStorage.setItem("isSensitive", String(newVal));
+    if (data) {
+      const riskAlerts = evaluateRisk(data, newVal);
+      setAlerts(riskAlerts);
+      await handleRiskNotification(riskAlerts);
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+  };
   const hasAnimatedRef = useRef(false);
 
   // ⏱ Last fetch timestamp — used for AppState cooldown only
@@ -570,6 +1047,9 @@ export default function HomeScreen() {
               coordsForSync.longitude,
               true,
               alertedTypesRef.current,
+              undefined,
+              undefined,
+              isSensitiveRef.current,
             ).catch(() => {});
           }
         } catch (err) {
@@ -584,6 +1064,9 @@ export default function HomeScreen() {
     }
   };
 
+  // FIX: Was calling registerDeviceWithServer TWICE — once with avg data, then
+  // again without it (overwriting emaPM25/emaPM10 with undefined on the server).
+  // Now checks FCM token first, then makes a single registration call with avg data.
   const attemptDeviceRegistration = async (
     latitude: number,
     longitude: number,
@@ -594,16 +1077,7 @@ export default function HomeScreen() {
       return;
     }
 
-    try {
-      const avg = await getRollingAverage();
-      await registerDeviceWithServer(latitude, longitude, {
-        avgPM25: avg?.pm25Avg,
-        avgPM10: avg?.pm10Avg,
-      });
-    } catch (e) {
-      console.error("Failed to register device with server:", e);
-    }
-
+    // Check token FIRST — no point calling the server without a valid push token
     let token = await getFCMToken();
     if (!token) {
       token = await getFCMToken({ forceRefresh: true });
@@ -621,12 +1095,21 @@ export default function HomeScreen() {
     }
 
     try {
-      await registerDeviceWithServer(latitude, longitude);
+      // Single registration call — includes rolling average data
+      const avg = await getRollingAverage();
+      await registerDeviceWithServer(latitude, longitude, {
+        avgPM25: avg?.pm25Avg,
+        avgPM10: avg?.pm10Avg,
+        isSensitive: isSensitiveRef.current,
+      });
       updateLocationOnServer(
         latitude,
         longitude,
         true,
         alertedTypesRef.current,
+        undefined,
+        undefined,
+        isSensitiveRef.current,
       );
       // Registered successfully — don't re-register for 24 hours.
       // Server already does an upsert so repeated calls are wasteful.
@@ -689,7 +1172,11 @@ export default function HomeScreen() {
         const cachedUpdatedAt = await AsyncStorage.getItem("lastUpdatedAt");
         const cachedTrend = await AsyncStorage.getItem("lastTrend");
 
-        if (cachedCoords) setCoords(JSON.parse(cachedCoords));
+        if (cachedCoords) {
+          const parsed = JSON.parse(cachedCoords);
+          setCoords(parsed);
+          coordsRef.current = parsed;
+        }
         if (cachedLocationName) setLocationName(cachedLocationName);
         if (cachedEnvData) {
           const parsedEnv = JSON.parse(cachedEnvData);
@@ -863,6 +1350,8 @@ export default function HomeScreen() {
 
   // FIX: Tell server when app goes background/foreground
   // → server skips push when app is open (prevents duplicates)
+  // FIX: Now uses coordsRef instead of coords state to avoid tearing down
+  // and re-registering the listener on every GPS coordinate change (~every 5 min).
   useEffect(() => {
     const handleAppStateChange = (nextState: AppStateStatus) => {
       if (nextState === "active") {
@@ -873,25 +1362,31 @@ export default function HomeScreen() {
         }
         // Re-check background permission on every foreground transition.
         // Force bypass cooldown to catch Settings revocations immediately.
-        checkBackgroundPermission(coords ?? undefined, true);
+        checkBackgroundPermission(coordsRef.current ?? undefined, true);
         // Guard: only update if we have real coordinates — never send 0,0
-        if (coords) {
+        if (coordsRef.current) {
           updateLocationOnServer(
-            coords.latitude,
-            coords.longitude,
+            coordsRef.current.latitude,
+            coordsRef.current.longitude,
             true,
             alertedTypesRef.current,
+            undefined,
+            undefined,
+            isSensitiveRef.current,
           );
         }
       } else if (nextState === "background") {
         // App went to background — tell server to resume push
         // Guard: only update if we have real coordinates — never send 0,0
-        if (coords) {
+        if (coordsRef.current) {
           updateLocationOnServer(
-            coords.latitude,
-            coords.longitude,
+            coordsRef.current.latitude,
+            coordsRef.current.longitude,
             false,
             alertedTypesRef.current,
+            undefined,
+            undefined,
+            isSensitiveRef.current,
           );
         }
       }
@@ -900,27 +1395,31 @@ export default function HomeScreen() {
     const sub = AppState.addEventListener("change", handleAppStateChange);
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coords, bgLocationDenied]);
+  }, []);
 
   // 💓 Heartbeat: keep server's appOpen flag alive while app is in foreground.
   // The server's APP_OPEN_TTL_MS is 5 min — sending every 2 min ensures it
   // never expires while the app is active, preventing duplicate push notifications.
+  // FIX: Uses coordsRef — no more teardown/rebuild on every GPS tick.
   useEffect(() => {
     const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 
     const heartbeat = setInterval(() => {
-      if (AppState.currentState === "active" && coords) {
+      if (AppState.currentState === "active" && coordsRef.current) {
         updateLocationOnServer(
-          coords.latitude,
-          coords.longitude,
+          coordsRef.current.latitude,
+          coordsRef.current.longitude,
           true,
           alertedTypesRef.current,
+          undefined,
+          undefined,
+          isSensitiveRef.current,
         ).catch(() => {});
       }
     }, HEARTBEAT_INTERVAL_MS);
 
     return () => clearInterval(heartbeat);
-  }, [coords]);
+  }, []);
 
   const reverseGeocode = async (
     lat: number,
@@ -1041,6 +1540,7 @@ export default function HomeScreen() {
 
       const userCoords = await getUserLocation();
       setCoords(userCoords);
+      coordsRef.current = userCoords; // keep ref in sync
 
       // FIX: Clear stale alertedTypes when user moves to a significantly different location
       if (prevCoordsRef.current) {
@@ -1116,6 +1616,7 @@ export default function HomeScreen() {
       }
       const avg = await getRollingAverage();
       setRollingAvg(avg);
+      setHourlyHistory(await getHourlyHistory());
 
       // FIX: Always tell server app is open when checking from foreground,
       // not just when silent — ensures server skips push even on initial load.
@@ -1155,7 +1656,9 @@ export default function HomeScreen() {
       // Cooldown inside checkBackgroundPermission prevents thrashing.
       checkBackgroundPermission(userCoords);
 
-      const riskAlerts = evaluateRisk(envData);
+      // FIX: Use ref to avoid stale closure — isSensitive state is captured at
+      // render-time but checkEnvironment runs on a setInterval.
+      const riskAlerts = evaluateRisk(envData, isSensitiveRef.current);
       setAlerts(riskAlerts);
 
       const aqData = envData?.current?.air_quality;
@@ -1449,6 +1952,16 @@ export default function HomeScreen() {
               width: "100%",
             }}
           >
+            {/* 📉 TREND CHART (V2) */}
+            <TrendChart data={hourlyHistory} color={risk.color} />
+
+            {/* 🔮 FORECAST STRIP (V2) */}
+            <ForecastStrip
+              hours={data?.forecast?.forecastday?.[0]?.hour}
+              mode={forecastMode}
+              onModeChange={setForecastMode}
+              activeRiskColor={risk.color}
+            />
             {/* Gauge card */}
             <View
               style={[
@@ -1773,6 +2286,55 @@ export default function HomeScreen() {
           </RNAnimated.View>
         )}
 
+        {/* 👤 PERSONALIZATION (V2) */}
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={toggleSensitive}
+          style={[
+            s.card,
+            {
+              marginTop: 24,
+              borderColor: isSensitive
+                ? "rgba(239, 68, 68, 0.2)"
+                : "rgba(255,255,255,0.06)",
+              backgroundColor: isSensitive
+                ? "rgba(239, 68, 68, 0.05)"
+                : "rgba(255,255,255,0.03)",
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
+              borderLeftColor: isSensitive ? "#EF4444" : "#4B5563",
+            },
+          ]}
+        >
+          <View style={{ flex: 1, marginRight: 12 }}>
+            <Text
+              style={[
+                s.cardLabel,
+                { color: isSensitive ? "#F87171" : "#9CA3AF" },
+              ]}
+            >
+              HEALTH PROFILE
+            </Text>
+            <Text
+              style={{
+                fontSize: 14,
+                fontWeight: "700",
+                color: "#F3F4F6",
+                marginTop: 2,
+              }}
+            >
+              {isSensitive ? "Sensitive Group" : "Standard Mode"}
+            </Text>
+            <Text style={{ fontSize: 11, color: "#6B7280", marginTop: 1 }}>
+              {isSensitive
+                ? "Enhanced respiratory protection active."
+                : "Standard safety thresholds active."}
+            </Text>
+          </View>
+          <AnimatedSwitch active={isSensitive} />
+        </TouchableOpacity>
+
         {/* ══ UNIFIED FOOTER ══ */}
         <View style={s.unifiedFooter}>
           <View style={s.footerGroup}>
@@ -1892,7 +2454,7 @@ const s = StyleSheet.create({
     height: 264,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 32,
+    marginBottom: 0,
   },
   ring3: {
     position: "absolute",
@@ -1966,7 +2528,7 @@ const s = StyleSheet.create({
     borderRadius: 50,
     paddingHorizontal: 20,
     paddingVertical: 10,
-    marginBottom: 32,
+    marginTop: 24,
     maxWidth: "88%",
   },
   pillText: {
@@ -1980,7 +2542,7 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 20,
+    marginTop: 24,
   },
   loadText: { fontSize: 12, letterSpacing: 1, fontWeight: "600" },
   warnBox: {
@@ -1992,7 +2554,7 @@ const s = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    marginBottom: 12,
+    marginTop: 24,
     width: "100%",
   },
   warnText: {
@@ -2010,7 +2572,7 @@ const s = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    marginBottom: 20,
+    marginTop: 24,
     width: "100%",
   },
   errText: { color: "#F87171", fontSize: 13, fontWeight: "600" },
@@ -2023,12 +2585,12 @@ const s = StyleSheet.create({
     borderLeftWidth: 3,
     borderColor: "rgba(255,255,255,0.07)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
   },
   chipWrapper: {
     flex: 1,
     borderLeftWidth: 3,
-    borderRadius: 18,
+    borderRadius: 22,
     overflow: "hidden",
   },
   cardHead: {
@@ -2046,7 +2608,7 @@ const s = StyleSheet.create({
   cardAccent: { fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
   liveDot: { width: 7, height: 7, borderRadius: 4 },
 
-  chips: { flexDirection: "row", gap: 8, width: "100%", marginBottom: 12 },
+  chips: { flexDirection: "row", gap: 8, width: "100%", marginTop: 24 },
 
   alertCard: {
     width: "100%",
@@ -2056,7 +2618,7 @@ const s = StyleSheet.create({
     borderLeftWidth: 3,
     borderColor: "rgba(248,113,113,0.16)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
   },
   alertLabel: {
     fontSize: 9,
@@ -2093,7 +2655,7 @@ const s = StyleSheet.create({
     borderLeftWidth: 3,
     borderColor: "rgba(255,255,255,0.07)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
   },
   historyTitleRow: {
     flexDirection: "row",
@@ -2119,7 +2681,7 @@ const s = StyleSheet.create({
   },
 
   unifiedFooter: {
-    marginTop: 16,
+    marginTop: 24,
     marginBottom: 0,
     alignItems: "center",
     width: "100%",

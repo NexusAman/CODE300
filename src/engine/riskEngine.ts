@@ -10,6 +10,7 @@ export interface RiskAlert {
 
 export const evaluateRisk = (
   data: EnvironmentalData | null | undefined,
+  isSensitive: boolean = false,
 ): RiskAlert[] => {
   const alerts: RiskAlert[] = [];
 
@@ -24,6 +25,12 @@ export const evaluateRisk = (
   if (aq) {
     const aqi = calculateOverallAQI(aq);
 
+    // Personalization: Lower thresholds for sensitive groups
+    const warningThreshold = isSensitive ? 80 : RISK_LIMITS.AQI_WARNING;
+    const lightWarningThreshold = isSensitive
+      ? 51
+      : RISK_LIMITS.AQI_LIGHT_WARNING;
+
     if (aqi >= RISK_LIMITS.AQI_DANGER) {
       alerts.push({
         type: "AQI_danger",
@@ -36,17 +43,21 @@ export const evaluateRisk = (
         severity: "severe",
         message: `🚨 Very poor air — AQI ${aqi}. Respiratory illness risk, avoid outdoors.`,
       });
-    } else if (aqi >= RISK_LIMITS.AQI_WARNING) {
+    } else if (aqi >= warningThreshold) {
       alerts.push({
         type: "AQI_warning",
         severity: "warning",
-        message: `⚠️ Poor air quality — AQI ${aqi}. Health discomfort possible.`,
+        message: isSensitive
+          ? `⚠️ Sensitive Group Alert — AQI ${aqi}. High risk for respiratory conditions, stay indoors.`
+          : `⚠️ Poor air quality — AQI ${aqi}. Health discomfort possible.`,
       });
-    } else if (aqi >= RISK_LIMITS.AQI_LIGHT_WARNING) {
+    } else if (aqi >= lightWarningThreshold) {
       alerts.push({
         type: "AQI_light_warning",
         severity: "warning",
-        message: `💨 Moderate air — AQI ${aqi}. Sensitive groups should take caution.`,
+        message: isSensitive
+          ? `💨 Moderate air — AQI ${aqi}. Sensitive groups should limit outdoor exertion.`
+          : `💨 Moderate air — AQI ${aqi}. Sensitive groups should take caution.`,
       });
     }
   }

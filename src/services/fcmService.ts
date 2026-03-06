@@ -252,7 +252,7 @@ export const getFCMToken = async (options?: {
 export const registerDeviceWithServer = async (
   latitude: number,
   longitude: number,
-  options?: { avgPM25?: number; avgPM10?: number },
+  options?: { avgPM25?: number; avgPM10?: number; isSensitive?: boolean },
 ): Promise<void> => {
   if (IS_PLACEHOLDER_URL) {
     throw new Error(
@@ -284,6 +284,7 @@ export const registerDeviceWithServer = async (
       longitude,
       avgPM25: options?.avgPM25,
       avgPM10: options?.avgPM10,
+      isSensitive: options?.isSensitive,
     });
 
     // Persist the current token so we can detect future rotations
@@ -306,6 +307,7 @@ export const updateLocationOnServer = async (
   activeAlertTypes: string[] = [],
   avgPM25?: number,
   avgPM10?: number,
+  isSensitive: boolean = false,
 ): Promise<{ emaPM25?: number; emaPM10?: number } | null> => {
   if (IS_PLACEHOLDER_URL) return null; // silently skip — registerDeviceWithServer already warned
 
@@ -339,6 +341,7 @@ export const updateLocationOnServer = async (
       activeAlertTypes,
       avgPM25,
       avgPM10,
+      isSensitive,
     });
 
     lastLocationUpdate = { latitude, longitude, appOpen, sentAt: now };

@@ -1,31 +1,31 @@
 import { useRouter } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  FlatList,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    FlatList,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 
 import {
-  generateId,
-  getSavedLocations,
-  removeLocation,
-  SavedLocation,
-  saveLocation,
+    generateId,
+    getSavedLocations,
+    removeLocation,
+    SavedLocation,
+    saveLocation,
 } from "../../src/services/savedLocationsService";
 import {
-  fetchEnvironmentalData,
-  searchLocations,
-  WeatherSearchResult,
+    fetchEnvironmentalData,
+    searchLocations,
+    WeatherSearchResult,
 } from "../../src/services/weatherService";
 import {
-  calculateOverallAQI,
-  getAQIColor,
-  getAQILabelByValue,
+    calculateOverallAQI,
+    getAQIColor,
+    getAQILabelByValue,
 } from "../../src/utils/aqi";
 
 // ─── Saved Location Card ──────────────────────────────────────────────────────
@@ -54,7 +54,8 @@ const LocationCard = ({
 
   useEffect(() => {
     let cancelled = false;
-    // Stagger fetches by 300ms per card to avoid API burst
+    // FIX: Stagger fetches by 600ms per card to avoid API rate limiting
+    // when the user has many saved locations (WeatherAPI allows ~5 req/sec)
     const timer = setTimeout(async () => {
       try {
         const envData = await fetchEnvironmentalData(

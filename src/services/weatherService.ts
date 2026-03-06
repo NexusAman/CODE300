@@ -61,10 +61,11 @@ export const fetchEnvironmentalData = async (
 
   const response = await requestWithRetry<EnvironmentalData>({
     method: "GET",
-    url: "https://api.weatherapi.com/v1/current.json",
+    url: "https://api.weatherapi.com/v1/forecast.json",
     params: {
       key: API_KEY,
       q: `${lat},${lon}`,
+      days: 1,
       aqi: "yes",
     },
   });

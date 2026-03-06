@@ -1,12 +1,15 @@
-// ─── Rolling 24-Hour Average for PM2.5 & PM10 ─────────────────────────────
-// CPCB NAQI breakpoints are designed for 24-hour averages, but WeatherAPI
-// returns real-time instantaneous values. This service stores timestamped
-// readings and computes a rolling average to produce more accurate AQI.
-
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { calculateOverallAQIFromAvg } from "../utils/aqi";
 
 const STORAGE_KEY = "pm_readings_v1";
 const WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+export interface HistoryPoint {
+  /** Timestamp in ms */
+  time: number;
+  /** AQI value */
+  aqi: number;
+}
 
 interface PMReading {
   /** Unix timestamp in ms */
@@ -106,4 +109,51 @@ export const injectServerEMA = async (
 export const clearPMReadings = async (): Promise<void> => {
   cache = [];
   await AsyncStorage.removeItem(STORAGE_KEY);
+};
+
+/**
+ * Get 24 data points (one per hour) representing the last 24 hours of AQI.
+ * Used to render the Trend Chart.
+ */
+export const getHourlyHistory = async (): Promise<HistoryPoint[]> => {
+  const readings = await loadReadings();
+  const now = Date.now();
+  const cutoff = now - WINDOW_MS;
+  const recent = readings.filter((r) => r.t > cutoff);
+
+  // Pre-initialize bins for the last 24 hours
+  const bins: { sum25: number; sum10: number; count: number }[] = Array.from(
+    { length: 24 },
+    () => ({ sum25: 0, sum10: 0, count: 0 }),
+  );
+
+  // Group readings into bins in a single pass O(n)
+  for (const r of recent) {
+    const hoursAgo = Math.floor((now - r.t) / (60 * 60 * 1000));
+    if (hoursAgo >= 0 && hoursAgo < 24) {
+      bins[hoursAgo].sum25 += r.p25;
+      bins[hoursAgo].sum10 += r.p10;
+      bins[hoursAgo].count++;
+    }
+  }
+
+  const history: HistoryPoint[] = [];
+  // For each of the last 24 hours (most recent last)
+  for (let i = 23; i >= 0; i--) {
+    const binStart = now - (i + 1) * 60 * 60 * 1000;
+    const bin = bins[i];
+
+    if (bin.count > 0) {
+      const avg25 = bin.sum25 / bin.count;
+      const avg10 = bin.sum10 / bin.count;
+      history.push({
+        time: binStart,
+        aqi: Math.round(calculateOverallAQIFromAvg(avg25, avg10)),
+      });
+    } else {
+      // If no data for this bin, we'll return 0 so the chart sits on the floor.
+      history.push({ time: binStart, aqi: 0 });
+    }
+  }
+  return history;
 };
