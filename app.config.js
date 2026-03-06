@@ -21,9 +21,9 @@ export default {
       },
     },
     android: {
-      // Use the EAS-provided file path if available, else fallback to local for local builds
-      googleServicesFile:
-        process.env.GOOGLE_SERVICES_JSON || "./google-services.json",
+      // We only provide the path if the EAS environment variable is defined.
+      // Returning a local path that isn't checked into Git triggers an EAS CLI validation error.
+      googleServicesFile: process.env.GOOGLE_SERVICES_JSON,
       adaptiveIcon: {
         backgroundColor: "#060f0a",
         foregroundImage: "./assets/images/android-icon-foreground.png",
