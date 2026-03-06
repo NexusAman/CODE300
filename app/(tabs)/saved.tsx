@@ -43,20 +43,25 @@ type WeatherSummary = {
 const LocationCard = ({
   loc,
   onRemove,
+  index,
 }: {
   loc: SavedLocation;
   onRemove: (id: string) => void;
+  index: number;
 }) => {
   const [weather, setWeather] = useState<WeatherSummary>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const loadWeather = async () => {
+    let cancelled = false;
+    // Stagger fetches by 300ms per card to avoid API burst
+    const timer = setTimeout(async () => {
       try {
         const envData = await fetchEnvironmentalData(
           loc.latitude,
           loc.longitude,
         );
+        if (cancelled) return;
         const c = envData?.current;
         setWeather({
           aqi: c?.air_quality ? calculateOverallAQI(c.air_quality) : 0,
@@ -68,13 +73,16 @@ const LocationCard = ({
           wind: c?.wind_kph ?? 0,
         });
       } catch {
-        setWeather(null);
+        if (!cancelled) setWeather(null);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
+    }, index * 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
     };
-    loadWeather();
-  }, [loc.latitude, loc.longitude]);
+  }, [loc.latitude, loc.longitude, index]);
 
   const aqiColor = weather ? getAQIColor(weather.aqi) : "#6B7280";
   const aqiPct = weather ? Math.min(weather.aqi / 500, 1) : 0;
@@ -400,8 +408,8 @@ export default function SavedLocationsScreen() {
         <FlatList
           data={locations}
           keyExtractor={(l) => l.id}
-          renderItem={({ item }) => (
-            <LocationCard loc={item} onRemove={handleRemove} />
+          renderItem={({ item, index }) => (
+            <LocationCard loc={item} onRemove={handleRemove} index={index} />
           )}
           contentContainerStyle={{ paddingBottom: 40 }}
           showsVerticalScrollIndicator={false}

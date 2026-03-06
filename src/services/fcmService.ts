@@ -1,7 +1,9 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import axios, { AxiosError } from "axios";
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
+import { Platform } from "react-native";
 
 // Your Render.com server URL.
 // EXPO_PUBLIC_SERVER_URL in your .env / EAS secrets takes priority.
@@ -22,6 +24,47 @@ const serverApi = axios.create({
 const getClientAuthHeaders = () => {
   if (!CLIENT_API_KEY) return undefined;
   return { "x-client-key": CLIENT_API_KEY };
+};
+
+// ─── Stable device identifier — survives token rotation ─────────────────────
+// Expo push tokens can change across app reinstalls or OS updates.
+// A persistent deviceId lets the server de-duplicate entries so a single
+// physical device never occupies more than one slot.
+const DEVICE_ID_KEY = "@enviro_device_id";
+const LAST_TOKEN_KEY = "@enviro_last_fcm_token";
+let cachedDeviceId: string | null = null;
+
+const generateUUID = (): string => {
+  // Math.random-based UUID v4 (sufficient for device identification)
+  const hex = "0123456789abcdef";
+  let uuid = "";
+  for (let i = 0; i < 36; i++) {
+    if (i === 8 || i === 13 || i === 18 || i === 23) {
+      uuid += "-";
+    } else if (i === 14) {
+      uuid += "4";
+    } else if (i === 19) {
+      uuid += hex[(Math.random() * 4) | 8];
+    } else {
+      uuid += hex[(Math.random() * 16) | 0];
+    }
+  }
+  return uuid;
+};
+
+export const getDeviceId = async (): Promise<string> => {
+  if (cachedDeviceId) return cachedDeviceId;
+  try {
+    const stored = await AsyncStorage.getItem(DEVICE_ID_KEY);
+    if (stored) {
+      cachedDeviceId = stored;
+      return stored;
+    }
+  } catch {}
+  const id = `${Platform.OS}-${generateUUID()}`;
+  cachedDeviceId = id;
+  AsyncStorage.setItem(DEVICE_ID_KEY, id).catch(() => {});
+  return id;
 };
 
 // ─── Token cache — avoid calling getExpoPushTokenAsync() repeatedly ──────────
@@ -192,9 +235,6 @@ export const registerDeviceWithServer = async (
   longitude: number,
 ): Promise<void> => {
   if (IS_PLACEHOLDER_URL) {
-    // Throw so the caller (checkEnvironment) can show a visible error
-    // instead of silently swallowing the failure. This is the #1 reason
-    // users don't appear in the backend dashboard.
     throw new Error(
       "SERVER_URL is still the placeholder. Set EXPO_PUBLIC_SERVER_URL in your .env file or EAS secrets and rebuild the app.",
     );
@@ -204,16 +244,33 @@ export const registerDeviceWithServer = async (
     const token = await getFCMToken();
     if (!token) return;
 
+    const deviceId = await getDeviceId();
+
+    // Detect token rotation: if the token changed, send the old one so
+    // the server can remove the stale entry and avoid duplicate pushes.
+    let previousToken: string | undefined;
+    try {
+      const stored = await AsyncStorage.getItem(LAST_TOKEN_KEY);
+      if (stored && stored !== token) {
+        previousToken = stored;
+      }
+    } catch {}
+
     await postWithRetry(`${SERVER_URL}/register`, {
       fcmToken: token,
+      deviceId,
+      previousToken,
       latitude,
       longitude,
     });
 
+    // Persist the current token so we can detect future rotations
+    AsyncStorage.setItem(LAST_TOKEN_KEY, token).catch(() => {});
+
     console.log("✅ Device registered with server");
   } catch (err) {
     console.warn("Failed to register device with server:", err);
-    throw err; // re-throw so caller can surface it in UI
+    throw err;
   }
 };
 
@@ -247,8 +304,11 @@ export const updateLocationOnServer = async (
     const token = await getFCMToken();
     if (!token) return;
 
+    const deviceId = await getDeviceId();
+
     await postWithRetry(`${SERVER_URL}/update-location`, {
       fcmToken: token,
+      deviceId,
       latitude,
       longitude,
       appOpen,

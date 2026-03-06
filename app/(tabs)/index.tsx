@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   AppState,
   AppStateStatus,
+  DeviceEventEmitter,
   Platform,
   RefreshControl,
   Animated as RNAnimated,
@@ -444,6 +445,13 @@ export default function HomeScreen() {
   const nextRegistrationAllowedAtRef = useRef<number>(0);
   const REGISTRATION_FAILURE_BACKOFF_MS = 30 * 1000;
 
+  // Track previous coords to detect significant location changes
+  const prevCoordsRef = useRef<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const LOCATION_CHANGE_THRESHOLD = 0.01; // ~1.1 km — clear stale alerts on meaningful moves
+
   //  Relative time — updates every 30s automatically
   const [relativeTime, setRelativeTime] = useState<string | null>(null);
   useEffect(() => {
@@ -681,6 +689,24 @@ export default function HomeScreen() {
     loadPersistedAlerts();
   }, []);
 
+  // Listen for server push alerts saved by _layout.tsx so they
+  // appear in the alert history UI immediately without a restart.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      "serverAlertHistoryUpdated",
+      (
+        updated: {
+          message: string;
+          time: string;
+          severity: "warning" | "severe" | "danger";
+        }[],
+      ) => {
+        if (Array.isArray(updated)) setAlertHistory(updated);
+      },
+    );
+    return () => sub.remove();
+  }, []);
+
   const aqData = data?.current?.air_quality;
   const pm25 = aqData?.pm2_5;
   const realAQI = aqData ? calculateOverallAQI(aqData) : null;
@@ -807,6 +833,26 @@ export default function HomeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [coords, bgLocationDenied]);
 
+  // 💓 Heartbeat: keep server's appOpen flag alive while app is in foreground.
+  // The server's APP_OPEN_TTL_MS is 5 min — sending every 2 min ensures it
+  // never expires while the app is active, preventing duplicate push notifications.
+  useEffect(() => {
+    const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
+    const heartbeat = setInterval(() => {
+      if (AppState.currentState === "active" && coords) {
+        updateLocationOnServer(
+          coords.latitude,
+          coords.longitude,
+          true,
+          alertedTypesRef.current,
+        ).catch(() => {});
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => clearInterval(heartbeat);
+  }, [coords]);
+
   const reverseGeocode = async (
     lat: number,
     lon: number,
@@ -927,6 +973,24 @@ export default function HomeScreen() {
       const userCoords = await getUserLocation();
       setCoords(userCoords);
 
+      // FIX: Clear stale alertedTypes when user moves to a significantly different location
+      if (prevCoordsRef.current) {
+        const latDiff = Math.abs(
+          userCoords.latitude - prevCoordsRef.current.latitude,
+        );
+        const lonDiff = Math.abs(
+          userCoords.longitude - prevCoordsRef.current.longitude,
+        );
+        if (
+          latDiff > LOCATION_CHANGE_THRESHOLD ||
+          lonDiff > LOCATION_CHANGE_THRESHOLD
+        ) {
+          alertedTypesRef.current = [];
+          AsyncStorage.setItem("alertedTypes", "[]").catch(() => {});
+        }
+      }
+      prevCoordsRef.current = userCoords;
+
       const envData = await fetchEnvironmentalData(
         userCoords.latitude,
         userCoords.longitude,
@@ -945,16 +1009,14 @@ export default function HomeScreen() {
         !silent,
       );
 
-      // silent = true means app is open (interval or AppState foreground)
-      // → pass appOpen: true so server skips push (app handles it locally)
-      if (silent) {
-        updateLocationOnServer(
-          userCoords.latitude,
-          userCoords.longitude,
-          true,
-          alertedTypesRef.current,
-        );
-      }
+      // FIX: Always tell server app is open when checking from foreground,
+      // not just when silent — ensures server skips push even on initial load
+      updateLocationOnServer(
+        userCoords.latitude,
+        userCoords.longitude,
+        true,
+        alertedTypesRef.current,
+      );
 
       setData(envData);
       const now = new Date();

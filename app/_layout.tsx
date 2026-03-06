@@ -6,6 +6,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
+  DeviceEventEmitter,
   Image,
   StyleSheet,
   Text,
@@ -354,9 +355,11 @@ export default function RootLayout() {
             severity: data.severity || "severe",
           };
           const updated = [newItem, ...history].slice(0, 10);
-          AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
-            () => {},
-          );
+          AsyncStorage.setItem("alertHistory", JSON.stringify(updated))
+            .then(() => {
+              DeviceEventEmitter.emit("serverAlertHistoryUpdated", updated);
+            })
+            .catch(() => {});
         } catch (e) {
           console.warn("Failed to update alert history from notification:", e);
         }
