@@ -3,14 +3,24 @@
 // used as the return type for fetchEnvironmentalData.
 
 export interface AirQuality {
-  pm2_5: number;
-  "us-epa-index": number;
+  pm2_5?: number;
+  pm10?: number;
+  co?: number;
+  no2?: number;
+  o3?: number;
+  so2?: number;
+  "us-epa-index"?: number;
+  // ─── Server-side Overrides (for background risk checks) ──────────────
+  _cpcbAqi?: number; // Forced AQI from nearest station
+  _emaPM25?: number; // Smoothed 24-hr background average
+  _emaPM10?: number; // Smoothed 24-hr background average
 }
 
 export interface CurrentWeather {
   temp_c: number;
   feelslike_c: number;
   uv: number;
+  is_day: 0 | 1; // 1 = daytime, 0 = night — WeatherAPI always returns this
   vis_km: number;
   humidity: number;
   wind_kph: number;
@@ -26,7 +36,27 @@ export interface WeatherLocation {
   region?: string;
 }
 
+export interface ForecastHour {
+  time_epoch: number;
+  time: string;
+  temp_c: number;
+  precip_mm: number;
+  condition: {
+    text: string;
+    icon: string;
+  };
+  air_quality: AirQuality;
+}
+
+export interface WeatherForecast {
+  forecastday: {
+    date: string;
+    hour: ForecastHour[];
+  }[];
+}
+
 export interface EnvironmentalData {
   current: CurrentWeather;
   location?: WeatherLocation;
+  forecast?: WeatherForecast;
 }

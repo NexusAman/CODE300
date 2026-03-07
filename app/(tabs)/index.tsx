@@ -1,22 +1,42 @@
+import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Haptics from "expo-haptics";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
+import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Animated,
   AppState,
   AppStateStatus,
+  DeviceEventEmitter,
+  Dimensions,
   Platform,
+  RefreshControl,
+  Animated as RNAnimated,
+  Image as RNImage,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import Svg, { Defs, LinearGradient, Path, Stop } from "react-native-svg";
 import { evaluateRisk, RiskAlert } from "../../src/engine/riskEngine";
 import { sendRiskNotification } from "../../src/notifications/notificationService";
+import {
+  CPCBResult,
+  fetchNearestCPCBStation,
+} from "../../src/services/cpcbService";
 import {
   getFCMToken,
   registerDeviceWithServer,
@@ -28,25 +48,464 @@ import {
   isBackgroundLocationRunning,
   startBackgroundLocation,
 } from "../../src/services/locationService";
+import {
+  clearPMReadings,
+  getHourlyHistory,
+  getRollingAverage,
+  HistoryPoint,
+  injectServerEMA,
+  recordPMReading,
+  RollingAverage,
+} from "../../src/services/rollingAverageService";
 import { fetchEnvironmentalData } from "../../src/services/weatherService";
-import { EnvironmentalData } from "../../src/types/environment";
-import { calculateAQI } from "../../src/utils/aqi";
+import { EnvironmentalData, ForecastHour } from "../../src/types/environment";
+import {
+  calculateOverallAQI,
+  calculateOverallAQIFromAvg,
+  getAQIColor,
+  getAQILabelByValue,
+} from "../../src/utils/aqi";
+import { METRIC_COLORS } from "../../src/utils/metricColors";
+import { RISK_LIMITS } from "../../src/utils/riskThresholds";
+
+// ─── Trend Chart (V2) ────────────────────────────────────────────────────────
+
+const TrendChart = ({
+  data,
+  color,
+}: {
+  data: HistoryPoint[];
+  color: string;
+}) => {
+  const [chartWidth, setChartWidth] = useState(0);
+  if (!data || data.length < 2) return null;
+
+  const height = 40;
+  const maxVal = Math.max(...data.map((p) => p.aqi), 50);
+
+  // Cubic Bézier smoothing logic
+  let d = "";
+  if (chartWidth > 0) {
+    const points = data.map((p, i) => ({
+      x: (i / (data.length - 1)) * chartWidth,
+      y: height - (p.aqi / maxVal) * height,
+    }));
+
+    d = `M ${points[0].x},${points[0].y}`;
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[i];
+      const p1 = points[i + 1];
+      const cp1x = p0.x + (p1.x - p0.x) / 2;
+      const cp2x = p0.x + (p1.x - p0.x) / 2;
+      d += ` C ${cp1x},${p0.y} ${cp2x},${p1.y} ${p1.x},${p1.y}`;
+    }
+  }
+
+  return (
+    <View
+      style={[tsS.container, { borderLeftColor: color }]}
+      onLayout={(e) => setChartWidth(e.nativeEvent.layout.width - 36)}
+    >
+      <View style={tsS.header}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Ionicons name="stats-chart" size={10} color={color} />
+          <Text style={tsS.title}>24H TREND</Text>
+        </View>
+        <Text style={tsS.timeRange}>24H AGO — NOW</Text>
+      </View>
+      {chartWidth > 0 && (
+        <Svg width={chartWidth} height={height} style={tsS.svg}>
+          <Defs>
+            <LinearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={color} stopOpacity="0.25" />
+              <Stop offset="1" stopColor={color} stopOpacity="0" />
+            </LinearGradient>
+          </Defs>
+          <Path
+            d={`${d} L ${chartWidth},${height} L 0,${height} Z`}
+            fill="url(#trendGrad)"
+          />
+          <Path
+            d={d}
+            fill="none"
+            stroke={color}
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+        </Svg>
+      )}
+    </View>
+  );
+};
+
+const tsS = StyleSheet.create({
+  container: {
+    marginTop: 24,
+    width: "100%",
+    padding: 18,
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderLeftWidth: 3,
+    borderColor: "rgba(255,255,255,0.06)",
+  },
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  title: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#9CA3AF",
+    letterSpacing: 3,
+  },
+  timeRange: {
+    fontSize: 9,
+    fontWeight: "600",
+    color: "#4B5563",
+  },
+  svg: { overflow: "visible" },
+});
+
+const fsS = StyleSheet.create({
+  container: {
+    marginTop: 24,
+    width: "100%",
+    backgroundColor: "rgba(255,255,255,0.03)",
+    borderRadius: 22,
+    borderWidth: 1,
+    borderLeftWidth: 3, // Premium Sync
+    borderColor: "rgba(255,255,255,0.06)",
+    paddingVertical: 18,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 20,
+    paddingHorizontal: 18,
+  },
+  title: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#9CA3AF",
+    letterSpacing: 2.5,
+  },
+  selector: {
+    flexDirection: "row",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 14,
+    padding: 2,
+    gap: 2,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.05)",
+  },
+  selBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    minWidth: 32,
+    alignItems: "center",
+  },
+  selBtnActive: {
+    backgroundColor: "rgba(255,255,255,0.12)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  selText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#4B5563",
+    letterSpacing: 0.5,
+  },
+  selTextActive: {
+    color: "#F3F4F6",
+  },
+  podWrapper: {
+    borderLeftWidth: 3,
+    borderRadius: 22,
+    overflow: "hidden",
+    height: 114, // Increased height for better presence
+  },
+  podInner: {
+    flex: 1,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 4,
+    justifyContent: "space-between",
+  },
+  time: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: "#9CA3AF",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  iconPlaceholder: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  weatherIcon: {
+    width: 36,
+    height: 36,
+  },
+  aqi: { fontSize: 17, fontWeight: "800", letterSpacing: 0.2 },
+  unit: { fontSize: 10, fontWeight: "700", marginLeft: 1 },
+});
+
+// ─── Forecast Strip (V2) ─────────────────────────────────────────────────────
+
+const ForecastStrip: React.FC<{
+  hours?: ForecastHour[];
+  mode: "aqi" | "temp" | "precip";
+  onModeChange: (m: "aqi" | "temp" | "precip") => void;
+  activeRiskColor: string;
+}> = ({ hours, mode, onModeChange, activeRiskColor }) => {
+  if (!hours || hours.length === 0) return null;
+
+  const nextHours = hours
+    .filter((h) => h.time_epoch * 1000 > Date.now())
+    .slice(0, 12);
+
+  // 🌈 DYNAMIC MODE-BASED THEME COLOR
+  const firstHour = nextHours[0];
+  let modeThemeColor = activeRiskColor;
+
+  if (firstHour) {
+    if (mode === "temp") {
+      modeThemeColor =
+        firstHour.temp_c >= RISK_LIMITS.TEMP_DANGER
+          ? METRIC_COLORS.TEMP.danger
+          : firstHour.temp_c >= RISK_LIMITS.TEMP_SEVERE
+            ? METRIC_COLORS.TEMP.severe
+            : firstHour.temp_c >= RISK_LIMITS.TEMP_WARNING
+              ? METRIC_COLORS.TEMP.warning
+              : METRIC_COLORS.TEMP.normal;
+    } else if (mode === "precip") {
+      modeThemeColor =
+        firstHour.precip_mm >= RISK_LIMITS.PRECIP_DANGER
+          ? METRIC_COLORS.PRECIPITATION.danger
+          : firstHour.precip_mm >= RISK_LIMITS.PRECIP_SEVERE
+            ? METRIC_COLORS.PRECIPITATION.severe
+            : firstHour.precip_mm >= RISK_LIMITS.PRECIP_WARNING
+              ? METRIC_COLORS.PRECIPITATION.warning
+              : METRIC_COLORS.PRECIPITATION.normal;
+    }
+  }
+
+  return (
+    <View style={[fsS.container, { borderLeftColor: modeThemeColor }]}>
+      <View style={fsS.header}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Ionicons
+            name="time-outline"
+            size={13}
+            color={modeThemeColor + "CC"}
+          />
+          <Text style={[fsS.title, { color: modeThemeColor + "CC" }]}>
+            FUTURE OUTLOOK
+          </Text>
+        </View>
+
+        {/* 🔘 MODE SELECTOR CAPSULE */}
+        <View style={fsS.selector}>
+          {(["aqi", "temp", "precip"] as const).map((m) => {
+            const active = mode === m;
+            return (
+              <TouchableOpacity
+                key={m}
+                onPress={() => {
+                  onModeChange(m);
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                    () => {},
+                  );
+                }}
+                style={[fsS.selBtn, active && fsS.selBtnActive]}
+              >
+                <Ionicons
+                  name={
+                    m === "aqi"
+                      ? "cloud-outline"
+                      : m === "temp"
+                        ? "thermometer-outline"
+                        : "rainy-outline"
+                  }
+                  size={15}
+                  color={active ? modeThemeColor : modeThemeColor + "40"}
+                />
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {(() => {
+        // Recalibrate for 4.5-item visible grid (Compact Refinement)
+        const screenWidth = Dimensions.get("window").width;
+        const rootPadding = 40; // root padding (20*2)
+        const scrollHorizontalPadding = 32; // 16 * 2 (internal scroll padding)
+        const totalAvailable =
+          screenWidth - rootPadding - scrollHorizontalPadding;
+        const visibleGaps = 2.8 * 7; // roughly 4 gaps visible in a 4.5 grid
+        const itemWidth = (totalAvailable - visibleGaps) / 4;
+
+        return (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{
+              paddingLeft: 16,
+              paddingRight: 16,
+              paddingBottom: 4,
+            }}
+            snapToInterval={itemWidth + 8} // Precisely snap to items
+            decelerationRate="fast"
+          >
+            {nextHours.map((h, i) => {
+              const aqiValue = calculateOverallAQI(h.air_quality);
+              const aqiColor = getAQIColor(aqiValue);
+              const timeLabel = new Date(
+                h.time_epoch * 1000,
+              ).toLocaleTimeString([], { hour: "numeric", hour12: true });
+
+              let displayVal = String(aqiValue);
+              let unit = "";
+              let activeColor = aqiColor;
+
+              if (mode === "temp") {
+                displayVal = `${Math.round(h.temp_c)}°`;
+                unit = "C";
+                activeColor =
+                  h.temp_c >= RISK_LIMITS.TEMP_DANGER
+                    ? METRIC_COLORS.TEMP.danger
+                    : h.temp_c >= RISK_LIMITS.TEMP_SEVERE
+                      ? METRIC_COLORS.TEMP.severe
+                      : h.temp_c >= RISK_LIMITS.TEMP_WARNING
+                        ? METRIC_COLORS.TEMP.warning
+                        : METRIC_COLORS.TEMP.normal;
+              } else if (mode === "precip") {
+                displayVal = h.precip_mm.toFixed(1);
+                unit = "mm";
+                activeColor =
+                  h.precip_mm >= RISK_LIMITS.PRECIP_DANGER
+                    ? METRIC_COLORS.PRECIPITATION.danger
+                    : h.precip_mm >= RISK_LIMITS.PRECIP_SEVERE
+                      ? METRIC_COLORS.PRECIPITATION.severe
+                      : h.precip_mm >= RISK_LIMITS.PRECIP_WARNING
+                        ? METRIC_COLORS.PRECIPITATION.warning
+                        : METRIC_COLORS.PRECIPITATION.normal;
+              }
+
+              const iconUrl = h.condition.icon
+                ? `https:${h.condition.icon}`
+                : null;
+
+              return (
+                <View
+                  key={i}
+                  style={[
+                    fsS.podWrapper,
+                    {
+                      borderLeftColor: activeColor,
+                      width: itemWidth,
+                      marginRight: i === nextHours.length - 1 ? 0 : 8,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      fsS.podInner,
+                      { backgroundColor: activeColor + "15" },
+                    ]}
+                  >
+                    <View style={fsS.iconPlaceholder}>
+                      {iconUrl ? (
+                        <RNImage
+                          source={{ uri: iconUrl }}
+                          style={fsS.weatherIcon}
+                        />
+                      ) : (
+                        <Ionicons
+                          name="cloud-outline"
+                          size={24}
+                          color={activeColor}
+                        />
+                      )}
+                    </View>
+
+                    <Text style={[fsS.aqi, { color: activeColor }]}>
+                      {displayVal}
+                      {unit && <Text style={fsS.unit}>{unit}</Text>}
+                    </Text>
+
+                    <Text style={fsS.time}>{timeLabel}</Text>
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+        );
+      })()}
+    </View>
+  );
+};
+
+// ─── Animated Switch (V2) ───────────────────────────────────────────────────
+
+const AnimatedSwitch = ({ active }: { active: boolean }) => {
+  const translateX = useSharedValue(active ? 18 : 0);
+
+  useEffect(() => {
+    translateX.value = withTiming(active ? 18 : 0, {
+      duration: 250,
+      easing: Easing.out(Easing.back(1.5)),
+    });
+  }, [active, translateX]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+  }));
+
+  return (
+    <View
+      style={{
+        width: 42,
+        height: 24,
+        borderRadius: 12,
+        backgroundColor: active ? "#EF4444" : "rgba(255,255,255,0.1)",
+        justifyContent: "center",
+        paddingHorizontal: 3,
+        borderWidth: 1,
+        borderColor: active ? "#F87171" : "rgba(255,255,255,0.05)",
+      }}
+    >
+      <Animated.View
+        style={[
+          {
+            width: 18,
+            height: 18,
+            borderRadius: 9,
+            backgroundColor: "white",
+          },
+          animatedStyle,
+        ]}
+      />
+    </View>
+  );
+};
 
 // ─── AQI Helpers ─────────────────────────────────────────────────────────────
-
-const getAQILabel = (aqi: number | undefined) => {
-  if (aqi == null) return "Unknown";
-  const labels = [
-    "",
-    "Good",
-    "Moderate",
-    "Unhealthy (Sensitive)",
-    "Unhealthy",
-    "Very Unhealthy",
-    "Hazardous",
-  ];
-  return labels[aqi] ?? "Unknown";
-};
 
 // ─── Risk Config ──────────────────────────────────────────────────────────────
 
@@ -59,6 +518,7 @@ type RiskConfig = {
   advice: string;
 };
 
+// ─── NAQI Risk Tiers (CPCB India) ──────────────────────────────────────────
 const getRiskConfig = (realAQI: number | null): RiskConfig => {
   if (realAQI == null)
     return {
@@ -71,38 +531,56 @@ const getRiskConfig = (realAQI: number | null): RiskConfig => {
     };
   if (realAQI <= 50)
     return {
-      level: "SAFE",
-      color: "#34D399",
-      glow: "#34D39920",
+      level: "GOOD",
+      color: "#22C55E",
+      glow: "#22C55E20",
       icon: "✦",
       bg: "#060f0a",
       advice: "Air quality is ideal. Enjoy outdoor activities.",
     };
   if (realAQI <= 100)
     return {
+      level: "SATISFACTORY",
+      color: "#A3E635",
+      glow: "#A3E63520",
+      icon: "✦",
+      bg: "#080f04",
+      advice: "Minor discomfort possible for very sensitive people.",
+    };
+  if (realAQI <= 200)
+    return {
       level: "MODERATE",
       color: "#FBBF24",
       glow: "#FBBF2420",
       icon: "◈",
       bg: "#0f0c00",
-      advice: "Sensitive groups should limit prolonged exertion.",
+      advice: "May cause discomfort to people with asthma or heart disease.",
     };
-  if (realAQI <= 200)
+  if (realAQI <= 300)
     return {
-      level: "UNHEALTHY",
+      level: "POOR",
+      color: "#FB923C",
+      glow: "#FB923C20",
+      icon: "⚠",
+      bg: "#0f0800",
+      advice: "Discomfort on prolonged exposure. Avoid outdoor exertion.",
+    };
+  if (realAQI <= 400)
+    return {
+      level: "VERY POOR",
       color: "#F87171",
       glow: "#F8717120",
       icon: "⚠",
       bg: "#0f0505",
-      advice: "Limit outdoor activity. Wear a mask if going out.",
+      advice: "May cause respiratory illness. Limit outdoor activity.",
     };
   return {
-    level: "DANGEROUS",
+    level: "SEVERE",
     color: "#E879F9",
     glow: "#E879F920",
     icon: "☣",
     bg: "#0d0010",
-    advice: "Stay indoors. Serious health risk.",
+    advice: "Health emergency. Stay indoors, use air purifier.",
   };
 };
 
@@ -121,9 +599,9 @@ const getRelativeTime = (date: Date): string => {
 // ─── AQI Gauge ────────────────────────────────────────────────────────────────
 
 const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
-  const widthAnim = useRef(new Animated.Value(0)).current;
+  const widthAnim = useRef(new RNAnimated.Value(0)).current;
   useEffect(() => {
-    Animated.timing(widthAnim, {
+    RNAnimated.timing(widthAnim, {
       toValue: Math.min((aqi ?? 0) / 500, 1),
       duration: 1000,
       useNativeDriver: false,
@@ -139,12 +617,12 @@ const AQIGauge = ({ aqi, color }: { aqi: number | null; color: string }) => {
   return (
     <View style={gaugeS.wrapper}>
       <View style={gaugeS.track}>
-        {["#34D399", "#A3E635", "#FBBF24", "#FB923C", "#F87171", "#E879F9"].map(
+        {["#22C55E", "#A3E635", "#FBBF24", "#FB923C", "#F87171", "#E879F9"].map(
           (c, i) => (
             <View key={i} style={[gaugeS.seg, { backgroundColor: c + "28" }]} />
           ),
         )}
-        <Animated.View
+        <RNAnimated.View
           style={[gaugeS.fill, { width: barWidth, backgroundColor: color }]}
         />
       </View>
@@ -186,8 +664,6 @@ const gaugeS = StyleSheet.create({
   tick: { fontSize: 9, color: "#4B5563", fontWeight: "600" },
 });
 
-// ─── Stat Chip ────────────────────────────────────────────────────────────────
-
 const StatChip = ({
   icon,
   label,
@@ -199,8 +675,8 @@ const StatChip = ({
   value: string;
   accent: string;
 }) => (
-  <View style={chipS.chip}>
-    <Text style={chipS.icon}>{icon}</Text>
+  <View style={[chipS.chip, { backgroundColor: accent + "15" }]}>
+    <Text style={{ fontSize: 20 }}>{icon}</Text>
     <Text style={[chipS.value, { color: accent }]}>{value}</Text>
     <Text style={chipS.label}>{label}</Text>
   </View>
@@ -218,7 +694,6 @@ const chipS = StyleSheet.create({
     paddingHorizontal: 6,
     gap: 4,
   },
-  icon: { fontSize: 20 },
   value: { fontSize: 17, fontWeight: "800", letterSpacing: 0.2 },
   label: { fontSize: 9, color: "#9CA3AF", fontWeight: "700", letterSpacing: 1 },
 });
@@ -240,7 +715,7 @@ const MetricRow = ({
 }) => (
   <View style={[mS.row, last && { borderBottomWidth: 0, paddingBottom: 0 }]}>
     <View style={mS.left}>
-      <Text style={mS.icon}>{icon}</Text>
+      <Text style={{ fontSize: 16 }}>{icon}</Text>
       <Text style={mS.label}>{label}</Text>
     </View>
     <Text style={[mS.value, accent ? { color: accent } : {}]}>{value}</Text>
@@ -257,7 +732,6 @@ const mS = StyleSheet.create({
     borderBottomColor: "rgba(255,255,255,0.05)",
   },
   left: { flexDirection: "row", alignItems: "center", gap: 10 },
-  icon: { fontSize: 15, width: 22, textAlign: "center" },
   label: { fontSize: 13, color: "#9CA3AF", letterSpacing: 0.2 },
   value: { fontSize: 13, color: "#F9FAFB", fontWeight: "700" },
 });
@@ -289,12 +763,10 @@ const AlertHistoryItem = ({
   message,
   time,
   severity,
-  index,
 }: {
   message: string;
   time: string;
   severity?: "warning" | "severe" | "danger";
-  index: number;
 }) => {
   const cfg = severityConfig[severity ?? "severe"];
   return (
@@ -302,15 +774,17 @@ const AlertHistoryItem = ({
       style={[ahS.row, { borderLeftColor: cfg.color, backgroundColor: cfg.bg }]}
     >
       <View style={ahS.topRow}>
-        <View
-          style={[
-            ahS.severityBadge,
-            { backgroundColor: cfg.bg, borderColor: cfg.border },
-          ]}
-        >
-          <Text style={[ahS.severityLabel, { color: cfg.color }]}>
-            {cfg.label}
-          </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View
+            style={[
+              ahS.severityBadge,
+              { backgroundColor: cfg.bg, borderColor: cfg.border },
+            ]}
+          >
+            <Text style={[ahS.severityLabel, { color: cfg.color }]}>
+              {cfg.label}
+            </Text>
+          </View>
         </View>
         <Text style={ahS.time}>{time}</Text>
       </View>
@@ -368,8 +842,14 @@ const APPSTATE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
+// We export context so the root layout can color the StatusBar dynamically
+export const RiskContext = React.createContext<{ bg: string; color?: string }>({
+  bg: "#000000",
+});
+
 export default function HomeScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<EnvironmentalData | null>(null);
   const [alerts, setAlerts] = useState<RiskAlert[]>([]);
@@ -400,8 +880,12 @@ export default function HomeScreen() {
   // so trend was never computed.
   const previousAQIRef = useRef<number | null>(null);
   const isCheckingRef = useRef(false); // ⛔ prevents overlapping checks
+  const [refreshing, setRefreshing] = useState(false);
   const [trend, setTrend] = useState<"up" | "down" | "stable" | null>(null);
   const hasCachedDataRef = useRef(false); // tracks if cached data was restored
+  const [rollingAvg, setRollingAvg] = useState<RollingAverage | null>(null);
+  const [cpcbData, setCpcbData] = useState<CPCBResult | null>(null);
+  const [hourlyHistory, setHourlyHistory] = useState<HistoryPoint[]>([]);
 
   // 🔕 null = not yet checked, false = ok, true = denied
   // Starting as null prevents the banner from flashing on first render
@@ -409,6 +893,40 @@ export default function HomeScreen() {
   const [bgLocationDenied, setBgLocationDenied] = useState<boolean | null>(
     null,
   );
+  const [isSensitive, setIsSensitive] = useState(false);
+  // FIX: Ref mirror — avoids stale closure in setInterval-based checkEnvironment
+  const isSensitiveRef = useRef(false);
+  // FIX: Ref mirror — avoids AppState/heartbeat listener rebinding on every GPS tick
+  const coordsRef = useRef<{ latitude: number; longitude: number } | null>(
+    null,
+  );
+  const [forecastMode, setForecastMode] = useState<"aqi" | "temp" | "precip">(
+    "aqi",
+  );
+
+  // Load personalization on start
+  useEffect(() => {
+    AsyncStorage.getItem("isSensitive").then((v) => {
+      if (v === "true") {
+        setIsSensitive(true);
+        isSensitiveRef.current = true;
+      }
+    });
+  }, []);
+
+  const toggleSensitive = async () => {
+    const newVal = !isSensitive;
+    setIsSensitive(newVal);
+    isSensitiveRef.current = newVal; // keep ref in sync
+    await AsyncStorage.setItem("isSensitive", String(newVal));
+    if (data) {
+      const riskAlerts = evaluateRisk(data, newVal);
+      setAlerts(riskAlerts);
+      await handleRiskNotification(riskAlerts);
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+  };
+  const hasAnimatedRef = useRef(false);
 
   // ⏱ Last fetch timestamp — used for AppState cooldown only
   // Prevents spam API calls when user rapidly switches apps
@@ -420,6 +938,13 @@ export default function HomeScreen() {
   const PERMISSION_CHECK_COOLDOWN_MS = 60 * 1000; // Check at most every 60 seconds
   const nextRegistrationAllowedAtRef = useRef<number>(0);
   const REGISTRATION_FAILURE_BACKOFF_MS = 30 * 1000;
+
+  // Track previous coords to detect significant location changes
+  const prevCoordsRef = useRef<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const LOCATION_CHANGE_THRESHOLD = 0.1; // ~11 km — clear stale averages when moving between cities/regions
 
   //  Relative time — updates every 30s automatically
   const [relativeTime, setRelativeTime] = useState<string | null>(null);
@@ -434,9 +959,53 @@ export default function HomeScreen() {
     return () => clearInterval(t);
   }, [updatedAt]);
 
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(24)).current;
+  // 📈 Trend Animation Value
+  const trendAnim = useSharedValue(0);
+  useEffect(() => {
+    trendAnim.value = 0;
+    if (trend === "up" || trend === "down") {
+      trendAnim.value = withRepeat(
+        withTiming(1, { duration: 2800, easing: Easing.inOut(Easing.sin) }),
+        -1,
+        false,
+      );
+    } else if (trend === "stable") {
+      trendAnim.value = withRepeat(withTiming(1, { duration: 2400 }), -1, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trend]);
+
+  const trendIconStyle = useAnimatedStyle(() => {
+    if (trend === "up") {
+      return {
+        transform: [
+          { translateY: -trendAnim.value * 10 },
+          { scale: 1 - trendAnim.value * 0.15 },
+        ],
+        opacity: Math.pow(1 - trendAnim.value, 1.4),
+      };
+    }
+    if (trend === "down") {
+      return {
+        transform: [
+          { translateY: trendAnim.value * 10 },
+          { scale: 1 - trendAnim.value * 0.15 },
+        ],
+        opacity: Math.pow(1 - trendAnim.value, 1.4),
+      };
+    }
+    if (trend === "stable") {
+      return {
+        transform: [{ scale: 0.92 + trendAnim.value * 0.16 }],
+        opacity: 0.65 + trendAnim.value * 0.35,
+      };
+    }
+    return {};
+  });
+
+  const pulseAnim = useRef(new RNAnimated.Value(1)).current;
+  const fadeAnim = useRef(new RNAnimated.Value(0)).current;
+  const slideAnim = useRef(new RNAnimated.Value(24)).current;
 
   // 📍 Check background location permission status and sync with server
   const checkBackgroundPermission = async (
@@ -477,7 +1046,11 @@ export default function HomeScreen() {
               coordsForSync.latitude,
               coordsForSync.longitude,
               true,
-            ).catch(() => { });
+              alertedTypesRef.current,
+              undefined,
+              undefined,
+              isSensitiveRef.current,
+            ).catch(() => {});
           }
         } catch (err) {
           setBgLocationDenied((prev) => (prev !== true ? true : prev));
@@ -491,6 +1064,9 @@ export default function HomeScreen() {
     }
   };
 
+  // FIX: Was calling registerDeviceWithServer TWICE — once with avg data, then
+  // again without it (overwriting emaPM25/emaPM10 with undefined on the server).
+  // Now checks FCM token first, then makes a single registration call with avg data.
   const attemptDeviceRegistration = async (
     latitude: number,
     longitude: number,
@@ -501,6 +1077,7 @@ export default function HomeScreen() {
       return;
     }
 
+    // Check token FIRST — no point calling the server without a valid push token
     let token = await getFCMToken();
     if (!token) {
       token = await getFCMToken({ forceRefresh: true });
@@ -518,9 +1095,30 @@ export default function HomeScreen() {
     }
 
     try {
-      await registerDeviceWithServer(latitude, longitude);
-      updateLocationOnServer(latitude, longitude, true);
-      nextRegistrationAllowedAtRef.current = 0;
+      // Single registration call — includes rolling average data
+      const avg = await getRollingAverage();
+      await registerDeviceWithServer(latitude, longitude, {
+        avgPM25: avg?.pm25Avg,
+        avgPM10: avg?.pm10Avg,
+        isSensitive: isSensitiveRef.current,
+      });
+      updateLocationOnServer(
+        latitude,
+        longitude,
+        true,
+        alertedTypesRef.current,
+        undefined,
+        undefined,
+        isSensitiveRef.current,
+      );
+      // Registered successfully — don't re-register for 24 hours.
+      // Server already does an upsert so repeated calls are wasteful.
+      nextRegistrationAllowedAtRef.current = now + 24 * 60 * 60 * 1000;
+      // Persist so the cooldown survives app restarts (ref resets to 0 on every launch)
+      AsyncStorage.setItem(
+        "nextRegistrationAllowedAt",
+        String(nextRegistrationAllowedAtRef.current),
+      ).catch(() => {});
     } catch (regErr: unknown) {
       const authMismatch =
         typeof regErr === "object" &&
@@ -558,6 +1156,13 @@ export default function HomeScreen() {
         const storedHistory = await AsyncStorage.getItem("alertHistory");
         if (storedHistory) setAlertHistory(JSON.parse(storedHistory));
 
+        // Restore registration cooldown so it survives app restarts
+        const storedRegAt = await AsyncStorage.getItem(
+          "nextRegistrationAllowedAt",
+        );
+        if (storedRegAt)
+          nextRegistrationAllowedAtRef.current = Number(storedRegAt);
+
         // Restore last known state — renders stale data instantly while
         // the background refresh (triggered below) fetches fresh data.
         const cachedCoords = await AsyncStorage.getItem("lastCoords");
@@ -565,14 +1170,35 @@ export default function HomeScreen() {
           await AsyncStorage.getItem("lastLocationName");
         const cachedEnvData = await AsyncStorage.getItem("lastEnvData");
         const cachedUpdatedAt = await AsyncStorage.getItem("lastUpdatedAt");
+        const cachedTrend = await AsyncStorage.getItem("lastTrend");
 
-        if (cachedCoords) setCoords(JSON.parse(cachedCoords));
+        if (cachedCoords) {
+          const parsed = JSON.parse(cachedCoords);
+          setCoords(parsed);
+          coordsRef.current = parsed;
+        }
         if (cachedLocationName) setLocationName(cachedLocationName);
         if (cachedEnvData) {
-          setData(JSON.parse(cachedEnvData));
+          const parsedEnv = JSON.parse(cachedEnvData);
+          setData(parsedEnv);
           hasCachedDataRef.current = true;
+
+          const aqData = parsedEnv?.current?.air_quality;
+          if (aqData) {
+            previousAQIRef.current = calculateOverallAQI(aqData);
+          }
+
+          // Immediately evaluate alerts from cached data so they show on cold-start
+          // without waiting for the next checkEnvironment cycle
+          const cachedAlerts = evaluateRisk(parsedEnv);
+          setAlerts(cachedAlerts);
         }
         if (cachedUpdatedAt) setUpdatedAt(new Date(cachedUpdatedAt));
+        if (cachedTrend) setTrend(cachedTrend as "up" | "down" | "stable");
+
+        // Restore rolling average so cold-start AQI uses averaged values
+        const avg = await getRollingAverage();
+        if (avg) setRollingAvg(avg);
       } catch {
         // fail silently — not critical
       }
@@ -581,21 +1207,77 @@ export default function HomeScreen() {
     loadPersistedAlerts();
   }, []);
 
-  const epaIndex = data?.current?.air_quality?.["us-epa-index"];
-  const pm25 = data?.current?.air_quality?.pm2_5;
-  const realAQI = pm25 != null ? calculateAQI(pm25) : null;
+  // Listen for server push alerts saved by _layout.tsx so they
+  // appear in the alert history UI immediately without a restart.
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      "serverAlertHistoryUpdated",
+      (
+        updated: {
+          message: string;
+          time: string;
+          severity: "warning" | "severe" | "danger";
+        }[],
+      ) => {
+        if (Array.isArray(updated)) setAlertHistory(updated);
+      },
+    );
+    return () => sub.remove();
+  }, []);
+
+  const aqData = data?.current?.air_quality;
+  const pm25 = aqData?.pm2_5;
+
+  // ─── 3-Tier AQI Fallback ──────────────────────────────────────────────
+  // 1️⃣ CPCB station AQI (official 24-hr averaged, ground-truth)
+  // 2️⃣ WeatherAPI PM → blended rolling average
+  // 3️⃣ Cached data (already held in `data` state from AsyncStorage)
+  const instantAQI = aqData ? calculateOverallAQI(aqData) : null;
+  const aqiSource: "cpcb" | "weatherapi" | "cached" | null = (() => {
+    if (cpcbData?.isFresh && cpcbData.station.aqi != null) return "cpcb";
+    if (instantAQI !== null) return "weatherapi";
+    if (data != null) return "cached";
+    return null;
+  })();
+
+  const realAQI = (() => {
+    // 1️⃣ CPCB official AQI — already 24-hr averaged by the station
+    if (aqiSource === "cpcb") return cpcbData!.station.aqi!;
+
+    // 2️⃣ WeatherAPI with rolling average blend
+    if (instantAQI === null) return null;
+
+    // TRAVEL MODE: If moving fast (> 0.05 deg since last check), prioritize instant reading.
+    // 0.05 deg = ~5.5km. In 5 mins = 66km/h. In 10 mins = 33km/h.
+    const isMovingFast =
+      prevCoordsRef.current &&
+      coords &&
+      (Math.abs(coords.latitude - prevCoordsRef.current.latitude) > 0.05 ||
+        Math.abs(coords.longitude - prevCoordsRef.current.longitude) > 0.05);
+
+    if (isMovingFast) return instantAQI;
+
+    if (rollingAvg == null || rollingAvg.sampleCount < 2) return instantAQI;
+
+    const avgAQI = calculateOverallAQIFromAvg(
+      rollingAvg.pm25Avg,
+      rollingAvg.pm10Avg,
+    );
+    const weight = Math.min(rollingAvg.spanHours / 24, 1);
+    return Math.round(weight * avgAQI + (1 - weight) * instantAQI);
+  })();
   const risk = getRiskConfig(realAQI);
 
   // Animation
   useEffect(() => {
-    const anim = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
+    const anim = RNAnimated.loop(
+      RNAnimated.sequence([
+        RNAnimated.timing(pulseAnim, {
           toValue: 1.14,
           duration: 2400,
           useNativeDriver: true,
         }),
-        Animated.timing(pulseAnim, {
+        RNAnimated.timing(pulseAnim, {
           toValue: 1,
           duration: 2400,
           useNativeDriver: true,
@@ -607,22 +1289,25 @@ export default function HomeScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 🎬 Entry Animation Logic — Gated to prevent refresh shifts
   useEffect(() => {
-    if (data) {
+    if (data && !hasAnimatedRef.current) {
       fadeAnim.setValue(0);
       slideAnim.setValue(24);
-      Animated.parallel([
-        Animated.timing(fadeAnim, {
+      RNAnimated.parallel([
+        RNAnimated.timing(fadeAnim, {
           toValue: 1,
           duration: 650,
           useNativeDriver: true,
         }),
-        Animated.timing(slideAnim, {
+        RNAnimated.timing(slideAnim, {
           toValue: 0,
           duration: 500,
           useNativeDriver: true,
         }),
-      ]).start();
+      ]).start(() => {
+        hasAnimatedRef.current = true;
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
@@ -635,8 +1320,17 @@ export default function HomeScreen() {
   useEffect(() => {
     if (!alertsLoaded) return;
     const init = async () => {
-      // If we already have cached data, run silently (no spinner)
-      // so the user instantly sees last-known state while it refreshes.
+      // If we have recent cached data (< 5 min old), skip the fetch entirely.
+      // On first install there's no cache, so it always fetches.
+      if (hasCachedDataRef.current && updatedAt) {
+        const ageMs = Date.now() - updatedAt.getTime();
+        if (ageMs < REFRESH_INTERVAL_MS) {
+          // Data is still fresh — don't waste an API call
+          return;
+        }
+      }
+
+      // No cache (first install) or stale data → fetch
       await checkEnvironment(!hasCachedDataRef.current);
     };
     init();
@@ -656,6 +1350,8 @@ export default function HomeScreen() {
 
   // FIX: Tell server when app goes background/foreground
   // → server skips push when app is open (prevents duplicates)
+  // FIX: Now uses coordsRef instead of coords state to avoid tearing down
+  // and re-registering the listener on every GPS coordinate change (~every 5 min).
   useEffect(() => {
     const handleAppStateChange = (nextState: AppStateStatus) => {
       if (nextState === "active") {
@@ -666,16 +1362,32 @@ export default function HomeScreen() {
         }
         // Re-check background permission on every foreground transition.
         // Force bypass cooldown to catch Settings revocations immediately.
-        checkBackgroundPermission(coords ?? undefined, true);
+        checkBackgroundPermission(coordsRef.current ?? undefined, true);
         // Guard: only update if we have real coordinates — never send 0,0
-        if (coords) {
-          updateLocationOnServer(coords.latitude, coords.longitude, true);
+        if (coordsRef.current) {
+          updateLocationOnServer(
+            coordsRef.current.latitude,
+            coordsRef.current.longitude,
+            true,
+            alertedTypesRef.current,
+            undefined,
+            undefined,
+            isSensitiveRef.current,
+          );
         }
       } else if (nextState === "background") {
         // App went to background — tell server to resume push
         // Guard: only update if we have real coordinates — never send 0,0
-        if (coords) {
-          updateLocationOnServer(coords.latitude, coords.longitude, false);
+        if (coordsRef.current) {
+          updateLocationOnServer(
+            coordsRef.current.latitude,
+            coordsRef.current.longitude,
+            false,
+            alertedTypesRef.current,
+            undefined,
+            undefined,
+            isSensitiveRef.current,
+          );
         }
       }
     };
@@ -683,7 +1395,31 @@ export default function HomeScreen() {
     const sub = AppState.addEventListener("change", handleAppStateChange);
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coords, bgLocationDenied]);
+  }, []);
+
+  // 💓 Heartbeat: keep server's appOpen flag alive while app is in foreground.
+  // The server's APP_OPEN_TTL_MS is 5 min — sending every 2 min ensures it
+  // never expires while the app is active, preventing duplicate push notifications.
+  // FIX: Uses coordsRef — no more teardown/rebuild on every GPS tick.
+  useEffect(() => {
+    const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
+    const heartbeat = setInterval(() => {
+      if (AppState.currentState === "active" && coordsRef.current) {
+        updateLocationOnServer(
+          coordsRef.current.latitude,
+          coordsRef.current.longitude,
+          true,
+          alertedTypesRef.current,
+          undefined,
+          undefined,
+          isSensitiveRef.current,
+        ).catch(() => {});
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => clearInterval(heartbeat);
+  }, []);
 
   const reverseGeocode = async (
     lat: number,
@@ -758,7 +1494,7 @@ export default function HomeScreen() {
       AsyncStorage.setItem(
         "alertedTypes",
         JSON.stringify(alertedTypesRef.current),
-      ).catch(() => { });
+      ).catch(() => {});
 
       // 📜 Save only severe/danger to history — warnings show in UI only
       const severeAndAbove = newAlerts.filter(
@@ -773,7 +1509,7 @@ export default function HomeScreen() {
           }));
           const updated = [...newItems, ...prev].slice(0, 10);
           AsyncStorage.setItem("alertHistory", JSON.stringify(updated)).catch(
-            () => { },
+            () => {},
           );
           return updated;
         });
@@ -788,11 +1524,14 @@ export default function HomeScreen() {
     AsyncStorage.setItem(
       "alertedTypes",
       JSON.stringify(alertedTypesRef.current),
-    ).catch(() => { });
+    ).catch(() => {});
   };
 
-  const checkEnvironment = async (silent = false) => {
-    if (isCheckingRef.current) return;
+  const checkEnvironment = async (silent = false): Promise<boolean> => {
+    if (isCheckingRef.current) {
+      setRefreshing(false); // prevent spinner hang if a check is already in-flight
+      return false; // skipped — another check was already in-flight
+    }
     isCheckingRef.current = true;
 
     try {
@@ -801,11 +1540,57 @@ export default function HomeScreen() {
 
       const userCoords = await getUserLocation();
       setCoords(userCoords);
+      coordsRef.current = userCoords; // keep ref in sync
 
-      const envData = await fetchEnvironmentalData(
-        userCoords.latitude,
-        userCoords.longitude,
-      );
+      // FIX: Clear stale alertedTypes when user moves to a significantly different location
+      if (prevCoordsRef.current) {
+        const latDiff = Math.abs(
+          userCoords.latitude - prevCoordsRef.current.latitude,
+        );
+        const lonDiff = Math.abs(
+          userCoords.longitude - prevCoordsRef.current.longitude,
+        );
+        if (
+          latDiff > LOCATION_CHANGE_THRESHOLD ||
+          lonDiff > LOCATION_CHANGE_THRESHOLD
+        ) {
+          alertedTypesRef.current = [];
+          AsyncStorage.setItem("alertedTypes", "[]").catch(() => {});
+          // Clear PM history — old location's readings would skew the average
+          clearPMReadings().catch(() => {});
+        }
+      }
+
+      // ─── 3-Tier Data Fetch ─────────────────────────────────────────────
+      // 1️⃣ Try CPCB + WeatherAPI in parallel
+      // 2️⃣ If WeatherAPI fails but CPCB works → use cached weather + CPCB AQI
+      // 3️⃣ If both fail → keep existing cached data (set in useEffect on mount)
+
+      let envData: EnvironmentalData | null = null;
+      let cpcbResult: CPCBResult | null = null;
+
+      const [weatherResult, cpcbSettled] = await Promise.allSettled([
+        fetchEnvironmentalData(userCoords.latitude, userCoords.longitude),
+        fetchNearestCPCBStation(userCoords.latitude, userCoords.longitude),
+      ]);
+
+      cpcbResult =
+        cpcbSettled.status === "fulfilled" ? cpcbSettled.value : null;
+      setCpcbData(cpcbResult);
+
+      if (weatherResult.status === "fulfilled") {
+        envData = weatherResult.value;
+      } else if (data) {
+        // WeatherAPI failed → keep showing cached data
+        envData = data;
+        console.warn(
+          "WeatherAPI failed, using cached data:",
+          weatherResult.reason,
+        );
+      } else {
+        // Both APIs failed and no cache — rethrow to trigger error UI
+        throw weatherResult.reason;
+      }
 
       // ✅ Always resolve location safely
       const resolvedLocationName = await reverseGeocode(
@@ -820,57 +1605,91 @@ export default function HomeScreen() {
         !silent,
       );
 
-      // silent = true means app is open (interval or AppState foreground)
-      // → pass appOpen: true so server skips push (app handles it locally)
-      if (silent) {
-        updateLocationOnServer(userCoords.latitude, userCoords.longitude, true);
-      }
-
       setData(envData);
       const now = new Date();
       setUpdatedAt(now);
 
+      // Record PM values for rolling 24-hr average
+      const aqFresh = envData?.current?.air_quality;
+      if (aqFresh?.pm2_5 != null && aqFresh?.pm10 != null) {
+        await recordPMReading(aqFresh.pm2_5, aqFresh.pm10);
+      }
+      const avg = await getRollingAverage();
+      setRollingAvg(avg);
+      setHourlyHistory(await getHourlyHistory());
+
+      // FIX: Always tell server app is open when checking from foreground,
+      // not just when silent — ensures server skips push even on initial load.
+      // Now also sends rolling average and receives server EMA for Hybrid Sync.
+      updateLocationOnServer(
+        userCoords.latitude,
+        userCoords.longitude,
+        true,
+        alertedTypesRef.current,
+        avg?.pm25Avg,
+        avg?.pm10Avg,
+      )
+        .then(async (serverEma) => {
+          if (serverEma?.emaPM25 != null && serverEma?.emaPM10 != null) {
+            // Inject server's background average into local history
+            await injectServerEMA(serverEma.emaPM25, serverEma.emaPM10);
+            // Refresh local average calculation
+            const updatedAvg = await getRollingAverage();
+            setRollingAvg(updatedAvg);
+          }
+        })
+        .catch(() => {});
+
       // Persist last-known state so cold-starts show data immediately
       AsyncStorage.setItem("lastCoords", JSON.stringify(userCoords)).catch(
-        () => { },
+        () => {},
       );
       AsyncStorage.setItem("lastLocationName", resolvedLocationName).catch(
-        () => { },
+        () => {},
       );
       AsyncStorage.setItem("lastEnvData", JSON.stringify(envData)).catch(
-        () => { },
+        () => {},
       );
-      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => { });
+      AsyncStorage.setItem("lastUpdatedAt", now.toISOString()).catch(() => {});
 
       // Keep permission state synchronized even after prior success.
       // Cooldown inside checkBackgroundPermission prevents thrashing.
       checkBackgroundPermission(userCoords);
 
-      const riskAlerts = evaluateRisk(envData);
+      // FIX: Use ref to avoid stale closure — isSensitive state is captured at
+      // render-time but checkEnvironment runs on a setInterval.
+      const riskAlerts = evaluateRisk(envData, isSensitiveRef.current);
       setAlerts(riskAlerts);
 
-      const pm25Value = envData?.current?.air_quality?.pm2_5;
-      const calculatedAQI = pm25Value != null ? calculateAQI(pm25Value) : null;
+      const aqData = envData?.current?.air_quality;
+      const calculatedAQI = aqData ? calculateOverallAQI(aqData) : null;
 
       if (calculatedAQI !== null && previousAQIRef.current !== null) {
+        let newTrend: "up" | "down" | "stable" = "stable";
         if (calculatedAQI > previousAQIRef.current + 5) {
-          setTrend("up");
+          newTrend = "up";
         } else if (calculatedAQI < previousAQIRef.current - 5) {
-          setTrend("down");
-        } else {
-          setTrend("stable");
+          newTrend = "down";
         }
+
+        setTrend(newTrend);
+        AsyncStorage.setItem("lastTrend", newTrend).catch(() => {});
       }
 
       previousAQIRef.current = calculatedAQI;
 
       if (calculatedAQI === null) {
         setTrend(null);
+        AsyncStorage.removeItem("lastTrend").catch(() => {});
       }
 
       lastFetchedAt.current = Date.now();
 
       await handleRiskNotification(riskAlerts);
+
+      // Update tracking after everything is done — ensures Travel Mode
+      // is correctly detected during this render cycle.
+      prevCoordsRef.current = userCoords;
     } catch (err: unknown) {
       // Even if weather fails, show coordinates instead of infinite loading
       if (!locationName && coords) {
@@ -895,120 +1714,144 @@ export default function HomeScreen() {
     } finally {
       isCheckingRef.current = false;
       if (!silent) setLoading(false);
+      setRefreshing(false); // Always stop the pull-to-refresh spinner
+    }
+    return true; // completed
+  };
+
+  const onRefresh = async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setRefreshing(true);
+    const didRun = await checkEnvironment(true);
+    // Only fire success haptic if refresh actually ran (not skipped by lock)
+    if (didRun) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
   };
 
   return (
-    <ScrollView
-      style={[s.root, { backgroundColor: risk.bg }]}
-      contentContainerStyle={s.scroll}
-      showsVerticalScrollIndicator={false}
-    >
-      {/* ══ TOP BAR ══ */}
-      <View style={s.topBar}>
-        <View style={s.topLeft}>
-          <Text style={s.appLabel}>ENVIRO MONITOR</Text>
-          <View style={s.locationRow}>
-            {locationName ? (
-              <>
-                <Text style={s.pinIcon}>📍</Text>
-                <Text style={s.locationText}>{locationName}</Text>
-              </>
-            ) : (
-              <>
-                <ActivityIndicator size="small" color="#6B7280" />
-                <Text style={s.locationMuted}>Locating…</Text>
-              </>
+    <>
+      <StatusBar backgroundColor={risk.bg} style="light" />
+      <ScrollView
+        style={[s.root, { backgroundColor: risk.bg }]}
+        contentContainerStyle={[
+          s.scroll,
+          { paddingBottom: Math.max(insets.bottom, 16) },
+        ]}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={risk.color}
+            colors={[risk.color || "#10B981"]} // Android support
+            progressViewOffset={insets.top + 8} // push spinner below status bar
+          />
+        }
+      >
+        {/* ══ TOP BAR ══ */}
+        <View style={s.topBar}>
+          <View style={s.topLeft}>
+            <Text style={s.appLabel}>ENVIRO MONITOR</Text>
+            <View style={s.locationRow}>
+              {locationName ? (
+                <>
+                  <Ionicons name="location-sharp" size={14} color="#EF4444" />
+                  <Text style={s.locationText}>{locationName}</Text>
+                </>
+              ) : (
+                <>
+                  <ActivityIndicator size="small" color="#6B7280" />
+                  <Text style={s.locationMuted}>Locating…</Text>
+                </>
+              )}
+            </View>
+          </View>
+
+          <View style={s.topRight}>
+            {coords && (
+              <View style={s.coordBadge}>
+                <Text style={s.coordLine}>
+                  {Math.abs(coords.latitude).toFixed(3)}°{" "}
+                  {coords.latitude >= 0 ? "N" : "S"}
+                </Text>
+                <Text style={s.coordLine}>
+                  {Math.abs(coords.longitude).toFixed(3)}°{" "}
+                  {coords.longitude >= 0 ? "E" : "W"}
+                </Text>
+              </View>
             )}
+            <TouchableOpacity
+              style={s.savedBtn}
+              onPress={() => router.push("/(tabs)/saved")}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="bookmark" size={16} color="#9CA3AF" />
+            </TouchableOpacity>
           </View>
         </View>
 
-        <View style={s.topRight}>
-          {coords && (
-            <View style={s.coordBadge}>
-              <Text style={s.coordLine}>{coords.latitude.toFixed(3)}° N</Text>
-              <Text style={s.coordLine}>{coords.longitude.toFixed(3)}° E</Text>
-            </View>
-          )}
-          <TouchableOpacity
-            style={s.savedBtn}
-            onPress={() => router.push("/(tabs)/saved")}
-            activeOpacity={0.7}
+        {/* ══ ORB ══ */}
+        <View style={s.orbSection}>
+          <RNAnimated.View
+            style={[
+              s.ring3,
+              {
+                borderColor: risk.color + "0e",
+                transform: [{ scale: pulseAnim }],
+              },
+            ]}
+          />
+          <RNAnimated.View
+            style={[
+              s.ring2,
+              {
+                borderColor: risk.color + "20",
+                transform: [{ scale: pulseAnim }],
+              },
+            ]}
+          />
+          <RNAnimated.View
+            style={[
+              s.ring1,
+              {
+                borderColor: risk.color + "40",
+                transform: [{ scale: pulseAnim }],
+              },
+            ]}
+          />
+          <View
+            style={[
+              s.orb,
+              { borderColor: risk.color + "70", backgroundColor: risk.glow },
+            ]}
           >
-            <Text style={s.savedBtnText}>📌</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* ══ ORB ══ */}
-      <View style={s.orbSection}>
-        <Animated.View
-          style={[
-            s.ring3,
-            {
-              borderColor: risk.color + "0e",
-              transform: [{ scale: pulseAnim }],
-            },
-          ]}
-        />
-        <Animated.View
-          style={[
-            s.ring2,
-            {
-              borderColor: risk.color + "20",
-              transform: [{ scale: pulseAnim }],
-            },
-          ]}
-        />
-        <Animated.View
-          style={[
-            s.ring1,
-            {
-              borderColor: risk.color + "40",
-              transform: [{ scale: pulseAnim }],
-            },
-          ]}
-        />
-        <View
-          style={[
-            s.orb,
-            { borderColor: risk.color + "70", backgroundColor: risk.glow },
-          ]}
-        >
-          <Text style={[s.orbIcon, { color: risk.color }]}>{risk.icon}</Text>
-          <Text style={[s.orbLevel, { color: risk.color }]}>{risk.level}</Text>
-          <Text style={s.orbAQI}>
-            {realAQI !== null ? `AQI  ${realAQI}` : "No data"}
-          </Text>
-          {trend && (
-            <View style={s.trendRow}>
-              <View
-                style={[
-                  s.trendPill,
-                  {
-                    backgroundColor:
-                      trend === "up"
-                        ? "#F8717118"
-                        : trend === "down"
-                          ? "#34D39918"
-                          : "#6B728018",
-                    borderColor:
-                      trend === "up"
-                        ? "#F8717140"
-                        : trend === "down"
-                          ? "#34D39940"
-                          : "#6B728040",
-                  },
-                ]}
-              >
-                <Text style={[s.trendIcon]}>
-                  {trend === "up" ? "▲" : trend === "down" ? "▼" : "●"}
-                </Text>
-                <Text
+            <Text style={[s.orbIcon, { color: risk.color }]}>{risk.icon}</Text>
+            <Text style={[s.orbLevel, { color: risk.color }]}>
+              {risk.level}
+            </Text>
+            <Text style={s.orbAQI}>
+              {realAQI !== null ? `AQI  ${realAQI}` : "No data"}
+            </Text>
+            {trend && (
+              <View style={s.trendRow}>
+                <View
                   style={[
-                    s.trendText,
+                    s.trendPill,
                     {
-                      color:
+                      backgroundColor:
+                        trend === "up"
+                          ? "rgba(248, 113, 113, 0.22)"
+                          : trend === "down"
+                            ? "rgba(52, 211, 153, 0.22)"
+                            : "rgba(107, 114, 128, 0.22)",
+                      borderColor:
+                        trend === "up"
+                          ? "rgba(248, 113, 113, 0.5)"
+                          : trend === "down"
+                            ? "rgba(52, 211, 153, 0.5)"
+                            : "rgba(107, 114, 128, 0.5)",
+                      shadowColor:
                         trend === "up"
                           ? "#F87171"
                           : trend === "down"
@@ -1017,255 +1860,526 @@ export default function HomeScreen() {
                     },
                   ]}
                 >
-                  {trend === "up"
-                    ? "Rising"
-                    : trend === "down"
-                      ? "Improving"
-                      : "Stable"}
-                </Text>
-              </View>
-            </View>
-          )}
-        </View>
-      </View>
-
-      {/* Advice */}
-      <View
-        style={[
-          s.pill,
-          {
-            borderColor: risk.color + "50",
-            backgroundColor: risk.color + "10",
-          },
-        ]}
-      >
-        <Text style={[s.pillText, { color: risk.color }]}>{risk.advice}</Text>
-      </View>
-
-      {/* ══ FEEDBACK ══ */}
-      {bgLocationDenied === true && (
-        <View style={s.warnBox}>
-          <Text style={s.warnText}>
-            🔕 Background alerts disabled — grant Allow all the time location
-            access in Settings for notifications when app is closed.
-          </Text>
-        </View>
-      )}
-      {loading && (
-        <View style={s.loadRow}>
-          <ActivityIndicator color={risk.color} size="small" />
-          <Text style={[s.loadText, { color: risk.color }]}>
-            Scanning environment…
-          </Text>
-        </View>
-      )}
-      {error && (
-        <View style={s.errBox}>
-          <Text style={s.errText}>⚡ {error}</Text>
-        </View>
-      )}
-
-      {/* ══ DATA ══ */}
-      {data && (
-        <Animated.View
-          style={{
-            opacity: fadeAnim,
-            transform: [{ translateY: slideAnim }],
-            width: "100%",
-          }}
-        >
-          {/* Gauge card */}
-          <View style={s.card}>
-            <View style={s.cardHead}>
-              <Text style={s.cardLabel}>AQI GAUGE</Text>
-              <Text style={[s.cardAccent, { color: risk.color }]}>
-                {realAQI ?? "–"} / 500
-              </Text>
-            </View>
-            <AQIGauge aqi={realAQI} color={risk.color} />
-          </View>
-
-          {/* Chips */}
-          <View style={s.chips}>
-            <StatChip
-              icon="🌡"
-              label="TEMP"
-              value={`${data.current.temp_c}°C`}
-              accent="#60A5FA"
-            />
-            <StatChip
-              icon="☀️"
-              label="UV IDX"
-              value={String(data.current.uv ?? "–")}
-              accent="#FBBF24"
-            />
-            <StatChip
-              icon="👁"
-              label="VIS KM"
-              value={`${data.current.vis_km ?? "–"}`}
-              accent="#34D399"
-            />
-            <StatChip
-              icon="💧"
-              label="HUMIDITY"
-              value={`${data.current.humidity ?? "–"}%`}
-              accent="#818CF8"
-            />
-          </View>
-
-          {/* Detail readings */}
-          <View style={s.card}>
-            <View style={s.cardHead}>
-              <Text style={s.cardLabel}>READINGS</Text>
-              <View style={[s.liveDot, { backgroundColor: risk.color }]} />
-            </View>
-            <MetricRow
-              icon="🌫"
-              label="PM2.5 Particles"
-              value={`${pm25 ?? "–"} µg/m³`}
-              accent={realAQI && realAQI > 100 ? "#F87171" : undefined}
-            />
-            <MetricRow
-              icon="📊"
-              label="Real AQI (0–500)"
-              value={realAQI !== null ? String(realAQI) : "–"}
-              accent={risk.color}
-            />
-            <MetricRow
-              icon="🏛"
-              label="EPA Category"
-              value={epaIndex ? `${epaIndex} · ${getAQILabel(epaIndex)}` : "–"}
-            />
-            <MetricRow
-              icon="🌡"
-              label="Feels Like"
-              value={`${data.current.feelslike_c ?? data.current.temp_c}°C`}
-            />
-            <MetricRow
-              icon="💨"
-              label="Wind Speed"
-              value={`${data.current.wind_kph ?? "–"} km/h`}
-            />
-            <MetricRow
-              icon="🌧"
-              label="Precipitation"
-              value={`${data.current.precip_mm ?? "–"} mm`}
-              last
-            />
-          </View>
-
-          {/* Alerts */}
-          {alerts.length > 0 && (
-            <View style={s.alertCard}>
-              <View style={s.cardHead}>
-                <Text style={s.alertLabel}>⚠ ACTIVE ALERTS</Text>
-                <View style={s.badge}>
-                  <Text style={s.badgeText}>{alerts.length}</Text>
-                </View>
-              </View>
-
-              {alerts.map((a, i) => (
-                <View key={i} style={s.alertRow}>
-                  <View
+                  <Animated.View
                     style={[
-                      s.alertDot,
-                      {
-                        backgroundColor:
-                          a.severity === "danger"
-                            ? "#E879F9"
-                            : a.severity === "severe"
-                              ? "#F87171"
-                              : "#FBBF24",
-                      },
+                      trendIconStyle,
+                      { alignItems: "center", justifyContent: "center" },
                     ]}
-                  />
+                  >
+                    <Text
+                      style={[
+                        s.trendIcon,
+                        {
+                          color:
+                            trend === "up"
+                              ? "#F87171"
+                              : trend === "down"
+                                ? "#34D399"
+                                : "#9CA3AF",
+                        },
+                      ]}
+                    >
+                      {trend === "up" ? "▲" : trend === "down" ? "▼" : "●"}
+                    </Text>
+                  </Animated.View>
                   <Text
                     style={[
-                      s.alertText,
+                      s.trendText,
                       {
                         color:
-                          a.severity === "danger"
-                            ? "#F0ABFC"
-                            : a.severity === "severe"
-                              ? "#FCA5A5"
-                              : "#FDE68A",
+                          trend === "up"
+                            ? "#F87171"
+                            : trend === "down"
+                              ? "#34D399"
+                              : "#9CA3AF",
                       },
                     ]}
                   >
-                    {a.message}
+                    {trend === "up"
+                      ? "RISING"
+                      : trend === "down"
+                        ? "IMPROVING"
+                        : "STABLE"}
                   </Text>
                 </View>
-              ))}
-            </View>
-          )}
-
-          {/* Alert History */}
-          {alertHistory.length > 0 && (
-            <View style={s.historyCard}>
-              <View style={s.cardHead}>
-                <View style={s.historyTitleRow}>
-                  <Text style={s.historyIcon}>🕓</Text>
-                  <Text style={s.historyCardLabel}>ALERT HISTORY</Text>
-                </View>
-                <View style={s.historyBadge}>
-                  <Text style={s.historyBadgeText}>{alertHistory.length}</Text>
-                </View>
               </View>
-
-              {alertHistory.map((item, i) => (
-                <AlertHistoryItem
-                  key={i}
-                  message={item.message}
-                  time={item.time}
-                  severity={item.severity}
-                  index={i}
-                />
-              ))}
-            </View>
-          )}
-        </Animated.View>
-      )}
-
-      {/* ══ BUTTON ══ */}
-      <TouchableOpacity
-        style={[s.btn, { borderColor: risk.color + "80" }]}
-        onPress={() => checkEnvironment()}
-        activeOpacity={0.7}
-        disabled={loading}
-      >
-        <View style={[s.btnInner, { backgroundColor: risk.color + "12" }]}>
-          {loading ? (
-            <View style={s.btnLoadRow}>
-              <ActivityIndicator size="small" color={risk.color} />
-              <Text style={[s.btnText, { color: risk.color }]}>Scanning…</Text>
-            </View>
-          ) : (
-            <Text style={[s.btnText, { color: risk.color }]}>
-              ↺ Refresh Data
-            </Text>
-          )}
+            )}
+          </View>
         </View>
-      </TouchableOpacity>
 
-      {/* ══ FOOTER ══ */}
-      <View style={s.footer}>
-        {updatedAt && (
-          <Text style={s.footerText}>
-            Updated ·{" "}
-            {relativeTime ??
-              updatedAt.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-          </Text>
+        {/* Advice */}
+        <View
+          style={[
+            s.pill,
+            {
+              borderColor: risk.color + "50",
+              backgroundColor: risk.color + "10",
+            },
+          ]}
+        >
+          <Text style={[s.pillText, { color: risk.color }]}>{risk.advice}</Text>
+        </View>
+
+        {/* ══ FEEDBACK ══ */}
+        {bgLocationDenied === true && (
+          <View style={s.warnBox}>
+            <Text style={s.warnText}>
+              🔕 Background alerts disabled — grant Allow all the time location
+              access in Settings for notifications when app is closed.
+            </Text>
+          </View>
         )}
-        {coords && (
-          <Text style={s.footerText}>
-            {coords.latitude.toFixed(5)}°, {coords.longitude.toFixed(5)}°
-          </Text>
+        {loading && !data && (
+          <View style={s.loadRow}>
+            <ActivityIndicator color={risk.color} size="small" />
+            <Text style={[s.loadText, { color: risk.color }]}>
+              Scanning environment…
+            </Text>
+          </View>
         )}
-      </View>
-    </ScrollView>
+        {error && (
+          <View style={s.errBox}>
+            <Text style={s.errText}>⚡ {error}</Text>
+          </View>
+        )}
+
+        {/* ══ DATA ══ */}
+        {data && (
+          <RNAnimated.View
+            style={{
+              opacity: fadeAnim,
+              transform: [{ translateY: slideAnim }],
+              width: "100%",
+            }}
+          >
+            {/* 📉 TREND CHART (V2) */}
+            <TrendChart data={hourlyHistory} color={risk.color} />
+
+            {/* 🔮 FORECAST STRIP (V2) */}
+            <ForecastStrip
+              hours={data?.forecast?.forecastday?.[0]?.hour}
+              mode={forecastMode}
+              onModeChange={setForecastMode}
+              activeRiskColor={risk.color}
+            />
+            {/* Gauge card */}
+            <View
+              style={[
+                s.card,
+                {
+                  borderLeftColor: risk.color,
+                  backgroundColor: risk.color + "0D",
+                },
+              ]}
+            >
+              <View style={s.cardHead}>
+                <Text style={s.cardLabel}>AQI GAUGE</Text>
+                <Text style={[s.cardAccent, { color: risk.color }]}>
+                  {realAQI ?? "–"} / 500
+                </Text>
+              </View>
+              {aqiSource === "cpcb" && cpcbData && (
+                <Text
+                  style={{ fontSize: 10, color: "#34D399", marginBottom: 2 }}
+                >
+                  ✓ CPCB Official · {cpcbData.station.stationName} (
+                  {cpcbData.station.distanceKm} km)
+                </Text>
+              )}
+              {aqiSource === "weatherapi" && (
+                <>
+                  {rollingAvg && rollingAvg.sampleCount > 1 && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#6B7280",
+                        marginBottom: 2,
+                      }}
+                    >
+                      {rollingAvg.spanHours >= 24
+                        ? `24-hr avg · ${rollingAvg.sampleCount} samples`
+                        : `${Math.round(Math.min((rollingAvg.spanHours / 24) * 100, 100))}% of 24-hr avg · ${rollingAvg.sampleCount} samples · ${rollingAvg.spanHours}h`}
+                    </Text>
+                  )}
+                  {cpcbData && !cpcbData.isFresh && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#FBBF24",
+                        marginBottom: 2,
+                      }}
+                    >
+                      CPCB offline · using WeatherAPI estimate
+                    </Text>
+                  )}
+                  {!cpcbData && (
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: "#6B7280",
+                        marginBottom: 2,
+                      }}
+                    >
+                      No CPCB station nearby · WeatherAPI estimate
+                    </Text>
+                  )}
+                </>
+              )}
+              {aqiSource === "cached" && (
+                <Text
+                  style={{ fontSize: 10, color: "#F87171", marginBottom: 2 }}
+                >
+                  ⚠ Offline · showing last known AQI
+                </Text>
+              )}
+              <AQIGauge aqi={realAQI} color={risk.color} />
+            </View>
+
+            {/* Chips */}
+            {(() => {
+              const tempColor =
+                data.current.temp_c >= RISK_LIMITS.TEMP_DANGER
+                  ? METRIC_COLORS.TEMP.danger
+                  : data.current.temp_c >= RISK_LIMITS.TEMP_SEVERE
+                    ? METRIC_COLORS.TEMP.severe
+                    : data.current.temp_c >= RISK_LIMITS.TEMP_WARNING
+                      ? METRIC_COLORS.TEMP.warning
+                      : METRIC_COLORS.TEMP.normal;
+
+              const uvVal =
+                data.current.is_day === 0 ? 0 : (data.current.uv ?? 0);
+              const uvColor =
+                uvVal >= RISK_LIMITS.UV_DANGER
+                  ? METRIC_COLORS.UV.danger
+                  : uvVal >= RISK_LIMITS.UV_SEVERE
+                    ? METRIC_COLORS.UV.severe
+                    : uvVal >= RISK_LIMITS.UV_WARNING
+                      ? METRIC_COLORS.UV.warning
+                      : METRIC_COLORS.UV.normal;
+
+              const visVal = data.current.vis_km ?? 99;
+              const visColor =
+                visVal <= RISK_LIMITS.VISIBILITY_DANGER
+                  ? METRIC_COLORS.VISIBILITY.danger
+                  : visVal <= RISK_LIMITS.VISIBILITY_SEVERE
+                    ? METRIC_COLORS.VISIBILITY.severe
+                    : visVal <= RISK_LIMITS.VISIBILITY_WARNING
+                      ? METRIC_COLORS.VISIBILITY.warning
+                      : METRIC_COLORS.VISIBILITY.normal;
+
+              const humVal = data.current.humidity ?? 0;
+              const humColor =
+                humVal >= RISK_LIMITS.HUMIDITY_DANGER
+                  ? METRIC_COLORS.HUMIDITY.danger
+                  : humVal >= RISK_LIMITS.HUMIDITY_SEVERE
+                    ? METRIC_COLORS.HUMIDITY.severe
+                    : humVal >= RISK_LIMITS.HUMIDITY_WARNING
+                      ? METRIC_COLORS.HUMIDITY.warning
+                      : METRIC_COLORS.HUMIDITY.normal;
+
+              return (
+                <View style={s.chips}>
+                  <View style={[s.chipWrapper, { borderLeftColor: tempColor }]}>
+                    <StatChip
+                      icon="🌡️"
+                      label="TEMP"
+                      value={`${data.current.temp_c}°C`}
+                      accent={tempColor}
+                    />
+                  </View>
+                  <View style={[s.chipWrapper, { borderLeftColor: uvColor }]}>
+                    <StatChip
+                      icon="☀️"
+                      label="UV IDX"
+                      value={
+                        data.current.is_day === 0
+                          ? "0"
+                          : String(data.current.uv ?? "–")
+                      }
+                      accent={uvColor}
+                    />
+                  </View>
+                  <View style={[s.chipWrapper, { borderLeftColor: visColor }]}>
+                    <StatChip
+                      icon="👁️"
+                      label="VIS KM"
+                      value={`${data.current.vis_km ?? "–"}`}
+                      accent={visColor}
+                    />
+                  </View>
+                  <View style={[s.chipWrapper, { borderLeftColor: humColor }]}>
+                    <StatChip
+                      icon="💧"
+                      label="HUMIDITY"
+                      value={`${data.current.humidity ?? "–"}%`}
+                      accent={humColor}
+                    />
+                  </View>
+                </View>
+              );
+            })()}
+
+            {/* Detail readings */}
+            <View
+              style={[
+                s.card,
+                {
+                  borderLeftColor: risk.color,
+                  backgroundColor: risk.color + "0D",
+                },
+              ]}
+            >
+              <View style={s.cardHead}>
+                <Text style={s.cardLabel}>READINGS</Text>
+                <View style={[s.liveDot, { backgroundColor: risk.color }]} />
+              </View>
+              <MetricRow
+                icon="📊"
+                label="NAQI"
+                value={
+                  realAQI !== null
+                    ? `${realAQI} · ${getAQILabelByValue(realAQI)}`
+                    : "–"
+                }
+                accent={risk.color}
+              />
+              <MetricRow
+                icon="☁️"
+                label="PM2.5"
+                value={`${pm25 ?? "–"} µg/m³`}
+                accent={
+                  pm25 == null
+                    ? "#64748B"
+                    : pm25 >= RISK_LIMITS.PM25_DANGER
+                      ? METRIC_COLORS.POLLUTION.severe
+                      : pm25 >= RISK_LIMITS.PM25_SEVERE
+                        ? METRIC_COLORS.POLLUTION.veryPoor
+                        : pm25 >= RISK_LIMITS.PM25_WARNING
+                          ? METRIC_COLORS.POLLUTION.poor
+                          : METRIC_COLORS.POLLUTION.good
+                }
+              />
+              <MetricRow
+                icon="🍃"
+                label="PM10"
+                value={`${aqData?.pm10 ?? "–"} µg/m³`}
+                accent={
+                  aqData?.pm10 == null
+                    ? "#64748B"
+                    : aqData.pm10 >= RISK_LIMITS.PM10_DANGER
+                      ? METRIC_COLORS.POLLUTION.severe
+                      : aqData.pm10 >= RISK_LIMITS.PM10_SEVERE
+                        ? METRIC_COLORS.POLLUTION.veryPoor
+                        : aqData.pm10 >= RISK_LIMITS.PM10_WARNING
+                          ? METRIC_COLORS.POLLUTION.poor
+                          : METRIC_COLORS.POLLUTION.good
+                }
+              />
+              <MetricRow
+                icon="🌡️"
+                label="Feels Like"
+                value={`${data.current.feelslike_c ?? data.current.temp_c}°C`}
+                accent={
+                  (data.current.feelslike_c ?? data.current.temp_c) >=
+                  RISK_LIMITS.TEMP_DANGER
+                    ? METRIC_COLORS.TEMP.danger
+                    : (data.current.feelslike_c ?? data.current.temp_c) >=
+                        RISK_LIMITS.TEMP_SEVERE
+                      ? METRIC_COLORS.TEMP.severe
+                      : (data.current.feelslike_c ?? data.current.temp_c) >=
+                          RISK_LIMITS.TEMP_WARNING
+                        ? METRIC_COLORS.TEMP.warning
+                        : METRIC_COLORS.TEMP.normal
+                }
+              />
+              <MetricRow
+                icon="🧭"
+                label="Wind"
+                value={`${data.current.wind_kph ?? "–"} km/h`}
+                accent={
+                  data.current.wind_kph == null
+                    ? "#64748B"
+                    : data.current.wind_kph >= RISK_LIMITS.WIND_DANGER
+                      ? METRIC_COLORS.WIND.danger
+                      : data.current.wind_kph >= RISK_LIMITS.WIND_SEVERE
+                        ? METRIC_COLORS.WIND.severe
+                        : data.current.wind_kph >= RISK_LIMITS.WIND_WARNING
+                          ? METRIC_COLORS.WIND.warning
+                          : METRIC_COLORS.WIND.normal
+                }
+              />
+              <MetricRow
+                icon="🌧️"
+                label="Precipitation"
+                value={`${data.current.precip_mm ?? "0"} mm`}
+                accent={
+                  (data.current.precip_mm ?? 0) >= RISK_LIMITS.PRECIP_DANGER
+                    ? METRIC_COLORS.PRECIPITATION.danger
+                    : (data.current.precip_mm ?? 0) >= RISK_LIMITS.PRECIP_SEVERE
+                      ? METRIC_COLORS.PRECIPITATION.severe
+                      : (data.current.precip_mm ?? 0) >=
+                          RISK_LIMITS.PRECIP_WARNING
+                        ? METRIC_COLORS.PRECIPITATION.warning
+                        : METRIC_COLORS.PRECIPITATION.normal
+                }
+                last
+              />
+            </View>
+
+            {/* Alerts */}
+            {alerts.length > 0 && (
+              <View style={[s.alertCard, { borderLeftColor: "#F87171" }]}>
+                <View style={s.cardHead}>
+                  <Text style={s.alertLabel}>⚠ ACTIVE ALERTS</Text>
+                  <View style={s.badge}>
+                    <Text style={s.badgeText}>{alerts.length}</Text>
+                  </View>
+                </View>
+
+                {alerts.map((a, i) => (
+                  <View key={i} style={s.alertRow}>
+                    <Text
+                      style={[
+                        s.alertText,
+                        {
+                          color:
+                            a.severity === "danger"
+                              ? "#F0ABFC"
+                              : a.severity === "severe"
+                                ? "#FCA5A5"
+                                : "#FDE68A",
+                        },
+                      ]}
+                    >
+                      {a.message}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Alert History */}
+            {alertHistory.length > 0 && (
+              <View style={[s.historyCard, { borderLeftColor: "#9CA3AF" }]}>
+                <View style={s.cardHead}>
+                  <View style={s.historyTitleRow}>
+                    <Text style={{ fontSize: 16 }}>🕐</Text>
+                    <Text style={s.historyCardLabel}>ALERT HISTORY</Text>
+                  </View>
+                  <View style={s.historyBadge}>
+                    <Text style={s.historyBadgeText}>
+                      {alertHistory.length}
+                    </Text>
+                  </View>
+                </View>
+
+                {alertHistory.map((item, i) => (
+                  <AlertHistoryItem
+                    key={i}
+                    message={item.message}
+                    time={item.time}
+                    severity={item.severity}
+                  />
+                ))}
+              </View>
+            )}
+          </RNAnimated.View>
+        )}
+
+        {/* 👤 PERSONALIZATION (V2) */}
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={toggleSensitive}
+          style={[
+            s.card,
+            {
+              marginTop: 24,
+              borderColor: isSensitive
+                ? "rgba(239, 68, 68, 0.2)"
+                : "rgba(255,255,255,0.06)",
+              backgroundColor: isSensitive
+                ? "rgba(239, 68, 68, 0.05)"
+                : "rgba(255,255,255,0.03)",
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
+              borderLeftColor: isSensitive ? "#EF4444" : "#4B5563",
+            },
+          ]}
+        >
+          <View style={{ flex: 1, marginRight: 12 }}>
+            <Text
+              style={[
+                s.cardLabel,
+                { color: isSensitive ? "#F87171" : "#9CA3AF" },
+              ]}
+            >
+              HEALTH PROFILE
+            </Text>
+            <Text
+              style={{
+                fontSize: 14,
+                fontWeight: "700",
+                color: "#F3F4F6",
+                marginTop: 2,
+              }}
+            >
+              {isSensitive ? "Sensitive Group" : "Standard Mode"}
+            </Text>
+            <Text style={{ fontSize: 11, color: "#6B7280", marginTop: 1 }}>
+              {isSensitive
+                ? "Enhanced respiratory protection active."
+                : "Standard safety thresholds active."}
+            </Text>
+          </View>
+          <AnimatedSwitch active={isSensitive} />
+        </TouchableOpacity>
+
+        {/* ══ UNIFIED FOOTER ══ */}
+        <View style={s.unifiedFooter}>
+          <View style={s.footerGroup}>
+            {updatedAt && (
+              <View style={s.footerMetaItem}>
+                <PulsingDot color="#10B981" />
+                <Text style={s.footerMetaText}>
+                  LIVE ·{" "}
+                  {relativeTime ??
+                    updatedAt.toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                </Text>
+              </View>
+            )}
+            {coords && (
+              <View style={s.footerMetaItem}>
+                <Text style={s.footerMetaText}>
+                  POS: {Math.abs(coords.latitude).toFixed(4)}°
+                  {coords.latitude >= 0 ? " N" : " S"},{" "}
+                  {Math.abs(coords.longitude).toFixed(4)}°
+                  {coords.longitude >= 0 ? " E" : " W"}
+                </Text>
+              </View>
+            )}
+          </View>
+          <View style={s.footerDivider} />
+          <Text
+            style={[
+              s.brandText,
+              {
+                color: risk.color + "99",
+                textShadowColor: risk.color + "40",
+                textShadowRadius: 4,
+                textShadowOffset: { width: 0, height: 0 },
+              },
+            ]}
+          >
+            © {new Date().getFullYear()} All Rights Reserved · Built by Elite
+            Executors
+          </Text>
+        </View>
+      </ScrollView>
+    </>
   );
 }
 
@@ -1277,7 +2391,6 @@ const s = StyleSheet.create({
     padding: 20,
     paddingTop: 58,
     alignItems: "center",
-    paddingBottom: 56,
   },
 
   topBar: {
@@ -1299,7 +2412,6 @@ const s = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  savedBtnText: { fontSize: 15 },
   appLabel: {
     fontSize: 9,
     letterSpacing: 3.5,
@@ -1307,7 +2419,6 @@ const s = StyleSheet.create({
     fontWeight: "800",
   },
   locationRow: { flexDirection: "row", alignItems: "center", gap: 5 },
-  pinIcon: { fontSize: 14 },
   locationText: {
     fontSize: 16,
     color: "#F3F4F6",
@@ -1333,49 +2444,55 @@ const s = StyleSheet.create({
   coordLine: {
     fontSize: 10,
     color: "#6B7280",
-    fontWeight: "600",
-    letterSpacing: 0.8,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
   },
 
   orbSection: {
-    width: 240,
-    height: 240,
+    width: 264,
+    height: 264,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 20,
+    marginBottom: 0,
   },
   ring3: {
     position: "absolute",
-    width: 240,
-    height: 240,
-    borderRadius: 120,
+    width: 264,
+    height: 264,
+    borderRadius: 132,
     borderWidth: 1,
   },
   ring2: {
     position: "absolute",
-    width: 206,
-    height: 206,
-    borderRadius: 103,
+    width: 228,
+    height: 228,
+    borderRadius: 114,
     borderWidth: 1,
   },
   ring1: {
     position: "absolute",
-    width: 178,
-    height: 178,
-    borderRadius: 89,
+    width: 198,
+    height: 198,
+    borderRadius: 99,
     borderWidth: 1.5,
   },
   orb: {
-    width: 154,
-    height: 154,
-    borderRadius: 77,
-    borderWidth: 2,
+    width: 176,
+    height: 176,
+    borderRadius: 88,
+    borderWidth: 3,
     alignItems: "center",
     justifyContent: "center",
     gap: 3,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
   },
-  orbIcon: { fontSize: 34, marginBottom: 2 },
-  orbLevel: { fontSize: 13, fontWeight: "900", letterSpacing: 3.5 },
+  orbIcon: { fontSize: 36, marginBottom: 2 },
+  orbLevel: { fontSize: 13, fontWeight: "900", letterSpacing: 1.5 },
   orbAQI: { fontSize: 11, color: "#9CA3AF", letterSpacing: 2, marginTop: 2 },
 
   trendRow: {
@@ -1389,16 +2506,21 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 5,
     borderRadius: 20,
-    borderWidth: 1,
+    borderWidth: 1.5,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
   },
   trendIcon: {
     fontSize: 8,
-    color: "#9CA3AF",
   },
   trendText: {
-    fontSize: 10,
+    fontSize: 8.5,
     fontWeight: "800",
-    letterSpacing: 1.5,
+    letterSpacing: 1,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+    textTransform: "uppercase",
   },
 
   pill: {
@@ -1406,7 +2528,7 @@ const s = StyleSheet.create({
     borderRadius: 50,
     paddingHorizontal: 20,
     paddingVertical: 10,
-    marginBottom: 32,
+    marginTop: 24,
     maxWidth: "88%",
   },
   pillText: {
@@ -1420,17 +2542,19 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 20,
+    marginTop: 24,
   },
   loadText: { fontSize: 12, letterSpacing: 1, fontWeight: "600" },
   warnBox: {
     backgroundColor: "rgba(251,191,36,0.08)",
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderColor: "rgba(251,191,36,0.22)",
+    borderLeftColor: "#FBBF24",
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    marginBottom: 12,
+    marginTop: 24,
     width: "100%",
   },
   warnText: {
@@ -1442,11 +2566,13 @@ const s = StyleSheet.create({
   errBox: {
     backgroundColor: "rgba(239,68,68,0.1)",
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderColor: "rgba(239,68,68,0.22)",
+    borderLeftColor: "#F87171",
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
-    marginBottom: 20,
+    marginTop: 24,
     width: "100%",
   },
   errText: { color: "#F87171", fontSize: 13, fontWeight: "600" },
@@ -1456,9 +2582,16 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.04)",
     borderRadius: 22,
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderColor: "rgba(255,255,255,0.07)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
+  },
+  chipWrapper: {
+    flex: 1,
+    borderLeftWidth: 3,
+    borderRadius: 22,
+    overflow: "hidden",
   },
   cardHead: {
     flexDirection: "row",
@@ -1475,16 +2608,17 @@ const s = StyleSheet.create({
   cardAccent: { fontSize: 13, fontWeight: "800", letterSpacing: 0.5 },
   liveDot: { width: 7, height: 7, borderRadius: 4 },
 
-  chips: { flexDirection: "row", gap: 8, width: "100%", marginBottom: 12 },
+  chips: { flexDirection: "row", gap: 8, width: "100%", marginTop: 24 },
 
   alertCard: {
     width: "100%",
     backgroundColor: "rgba(248,113,113,0.06)",
     borderRadius: 22,
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderColor: "rgba(248,113,113,0.16)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
   },
   alertLabel: {
     fontSize: 9,
@@ -1505,13 +2639,6 @@ const s = StyleSheet.create({
     gap: 10,
     marginBottom: 8,
   },
-  alertDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: "#F87171",
-    marginTop: 6,
-  },
   alertText: {
     flex: 1,
     color: "#FCA5A5",
@@ -1525,17 +2652,15 @@ const s = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.03)",
     borderRadius: 22,
     borderWidth: 1,
+    borderLeftWidth: 3,
     borderColor: "rgba(255,255,255,0.07)",
     padding: 18,
-    marginBottom: 12,
+    marginTop: 24,
   },
   historyTitleRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
-  },
-  historyIcon: {
-    fontSize: 12,
   },
   historyCardLabel: {
     fontSize: 9,
@@ -1555,26 +2680,65 @@ const s = StyleSheet.create({
     fontWeight: "700",
   },
 
-  btn: {
-    marginTop: 8,
-    borderWidth: 1.5,
-    borderRadius: 50,
-    overflow: "hidden",
-    width: "68%",
+  unifiedFooter: {
+    marginTop: 24,
+    marginBottom: 0,
+    alignItems: "center",
+    width: "100%",
   },
-  btnInner: { paddingVertical: 16, alignItems: "center" },
-  btnText: { fontSize: 12, fontWeight: "800", letterSpacing: 2.5 },
-  btnLoadRow: {
+  footerGroup: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "center",
+    gap: 16,
+    marginBottom: 10,
   },
-
-  footer: { marginTop: 24, alignItems: "center", gap: 4 },
-  footerText: {
-    fontSize: 10,
+  footerMetaItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  liveIndicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  footerMetaText: {
+    fontSize: 8.5,
     color: "#4B5563",
-    letterSpacing: 1,
-    fontWeight: "600",
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+  },
+  footerDivider: {
+    width: 24,
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    marginBottom: 12,
+  },
+  brandText: {
+    fontSize: 8,
+    color: "#374151",
+    letterSpacing: 1.5,
+    fontWeight: "800",
+    textTransform: "uppercase",
   },
 });
+
+const PulsingDot = ({ color }: { color: string }) => {
+  const sv = useSharedValue(1);
+  useEffect(() => {
+    sv.value = withRepeat(withTiming(0.4, { duration: 1000 }), -1, true);
+  }, [sv]);
+
+  const style = useAnimatedStyle(() => ({
+    opacity: sv.value,
+  }));
+
+  return (
+    <Animated.View
+      style={[s.liveIndicator, { backgroundColor: color }, style]}
+    />
+  );
+};

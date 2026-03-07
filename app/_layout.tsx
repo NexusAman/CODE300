@@ -6,6 +6,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
+  DeviceEventEmitter,
   Image,
   StyleSheet,
   Text,
@@ -339,6 +340,32 @@ export default function RootLayout() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const router = useRouter();
   const notifResponseListener = useRef<any>(null);
+  const notifReceivedListener = useRef<any>(null);
+
+  const saveServerAlertToHistory = (data: any) => {
+    if (!data?.source || data.source !== "server_alert" || !data?.message)
+      return;
+    AsyncStorage.getItem("alertHistory")
+      .then((historyStr) => {
+        try {
+          const history = historyStr ? JSON.parse(historyStr) : [];
+          const newItem = {
+            message: data.message,
+            time: new Date().toLocaleTimeString(),
+            severity: data.severity || "severe",
+          };
+          const updated = [newItem, ...history].slice(0, 10);
+          AsyncStorage.setItem("alertHistory", JSON.stringify(updated))
+            .then(() => {
+              DeviceEventEmitter.emit("serverAlertHistoryUpdated", updated);
+            })
+            .catch(() => {});
+        } catch (e) {
+          console.warn("Failed to update alert history from notification:", e);
+        }
+      })
+      .catch(() => {});
+  };
 
   useEffect(() => {
     // Hide native splash immediately so our animated one takes over
@@ -351,14 +378,28 @@ export default function RootLayout() {
       })
       .catch(() => {});
 
-    // Handle notification taps — bring user to home screen
+    // Save server alert to history when notification arrives in foreground
+    // (covers the race where server pushes while app transitions to foreground)
+    notifReceivedListener.current =
+      Notifications.addNotificationReceivedListener((notification) => {
+        const data = notification.request.content.data;
+        saveServerAlertToHistory(data);
+      });
+
+    // Handle notification taps — bring user to home screen and save to history
     notifResponseListener.current =
-      Notifications.addNotificationResponseReceivedListener(() => {
+      Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data;
+
+        // Save to history (same logic as received listener, handles cold-tap launch)
+        saveServerAlertToHistory(data);
+
         router.push("/(tabs)");
       });
 
     return () => {
       notifResponseListener.current?.remove();
+      notifReceivedListener.current?.remove();
     };
   }, [router]);
 

@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { Linking, Platform } from "react-native";
@@ -63,7 +64,18 @@ const ensureBackgroundTaskRegistered = () => {
         }
         if (data?.locations?.length) {
           const { latitude, longitude } = data.locations[0].coords;
-          updateLocationOnServer(latitude, longitude, false).catch((err) => {
+          // Read persisted alert types — background task can't access React state
+          let activeAlertTypes: string[] = [];
+          try {
+            const stored = await AsyncStorage.getItem("alertedTypes");
+            if (stored) activeAlertTypes = JSON.parse(stored);
+          } catch {}
+          updateLocationOnServer(
+            latitude,
+            longitude,
+            false,
+            activeAlertTypes,
+          ).catch((err) => {
             console.warn("Background location server sync failed:", err);
           });
           _onLocationUpdate?.(latitude, longitude);
@@ -130,7 +142,7 @@ export const startBackgroundLocation = async (): Promise<void> => {
     // Update every 5 min or if moved 500m — matches server cron interval
     timeInterval: 5 * 60 * 1000,
     distanceInterval: 500,
-    showsBackgroundLocationIndicator: false,
+    showsBackgroundLocationIndicator: true,
     foregroundService: {
       notificationTitle: "Enviro Monitor",
       notificationBody: "Monitoring environmental conditions…",

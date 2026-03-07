@@ -34,6 +34,10 @@ yarn-error.*
 .env*.local
 *.env
 
+# Firebase config — contains API keys, must not be committed
+google-services.json
+GoogleService-Info.plist
+
 # typescript
 *.tsbuildinfo
 
